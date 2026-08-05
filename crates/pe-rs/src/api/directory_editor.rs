@@ -8,7 +8,8 @@ use crate::domain::resource::{
     ResourceDataEntry, ResourceDirectory, ResourceEntry, ResourceEntryData, ResourceName,
 };
 use crate::domain::{
-    PeDocument, RelocationBlock, RelocationEntry, RelocationTable, Rva, TlsDirectory,
+    LoadConfigDirectory, PeDocument, RelocationBlock, RelocationEntry, RelocationTable, Rva,
+    TlsDirectory,
 };
 use crate::error::{PeError, Result};
 
@@ -39,6 +40,10 @@ pub trait DirectoryEditor {
     /// Remove every resource of `name` under type `type_id` (and the type
     /// itself once it is empty).
     fn remove_resource(&mut self, type_id: u32, name: &ResourceName) -> Result<()>;
+
+    // LoadConfig ----------------------------------------------------------
+    fn set_load_config(&mut self, lc: Option<LoadConfigDirectory>);
+    fn load_config_mut(&mut self) -> Option<&mut LoadConfigDirectory>;
 }
 
 impl DirectoryEditor for PeDocument {
@@ -148,6 +153,14 @@ impl DirectoryEditor for PeDocument {
             root.entries.remove(type_idx);
         }
         Ok(())
+    }
+
+    fn set_load_config(&mut self, lc: Option<LoadConfigDirectory>) {
+        self.load_config = lc;
+    }
+
+    fn load_config_mut(&mut self) -> Option<&mut LoadConfigDirectory> {
+        self.load_config.as_mut()
     }
 }
 

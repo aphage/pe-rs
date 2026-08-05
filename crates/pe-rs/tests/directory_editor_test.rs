@@ -4,6 +4,7 @@
 mod common;
 
 use pe_rs::api::DirectoryEditor;
+use pe_rs::domain::load_config::IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT;
 use pe_rs::domain::resource::RT_MANIFEST;
 use pe_rs::domain::{RelocationEntry, ResourceEntryData, ResourceName, Rva};
 use pe_rs::io::MOCK_IMAGE_BASE;
@@ -138,11 +139,13 @@ fn clear_all_directories_removes_them() {
         doc.set_resources(None);
         doc.set_relocations(None);
         doc.set_tls(None);
+        doc.set_load_config(None);
 
         let re = parse(&serialize(doc).unwrap()).unwrap();
         assert!(re.resources.is_none());
         assert!(re.relocations.is_none());
         assert!(re.tls.is_none());
+        assert!(re.load_config.is_none());
     });
 }
 
@@ -152,7 +155,35 @@ fn mut_helpers_are_none_when_absent() {
     doc.set_tls(None);
     doc.set_resources(None);
     doc.set_relocations(None);
+    doc.set_load_config(None);
     assert!(doc.tls_mut().is_none());
     assert!(doc.resources_mut().is_none());
     assert!(doc.relocations_mut().is_none());
+    assert!(doc.load_config_mut().is_none());
+}
+
+#[test]
+fn load_config_mut_edits_persist() {
+    common::both(|doc| {
+        let lc = doc.load_config_mut().expect("mock has load config");
+        lc.guard_cf_function_count = 42;
+        lc.guard_flags = IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT;
+
+        let re = parse(&serialize(doc).unwrap()).unwrap();
+        let l = re.load_config.expect("load config after round-trip");
+        assert_eq!(l.guard_cf_function_count, 42);
+        assert_eq!(l.guard_flags, IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT);
+        // untouched fields survive
+        assert_eq!(l.size, 0x140);
+        assert_eq!(l.security_cookie, MOCK_IMAGE_BASE + 0x2000);
+    });
+}
+
+#[test]
+fn set_load_config_none_removes() {
+    common::both(|doc| {
+        doc.set_load_config(None);
+        let re = parse(&serialize(doc).unwrap()).unwrap();
+        assert!(re.load_config.is_none());
+    });
 }

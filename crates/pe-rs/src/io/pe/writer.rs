@@ -184,6 +184,30 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
         }
     }
 
+    match &doc.load_config {
+        None => dirs[DataDirectoryIndex::LoadConfig.to_usize()] = DataDirectory::default(),
+        Some(lc) => {
+            let lc_dir = dirs[DataDirectoryIndex::LoadConfig.to_usize()];
+            let matches = lc_dir.rva != Rva::NULL
+                && parser::parse_load_config_from_doc(doc, lc_dir)
+                    .map(|t| &t == lc)
+                    .unwrap_or(false);
+            if !matches {
+                let base = align_up(image_end(&sections), section_alignment);
+                let blob = directory_render::render_load_config(lc, doc.arch);
+                let size = blob.len() as u32;
+                sections.push(Section {
+                    header: section_header_for(*b".pelcf\0\0", Rva(base), size as usize),
+                    data: blob,
+                });
+                dirs[DataDirectoryIndex::LoadConfig.to_usize()] = DataDirectory {
+                    rva: Rva(base),
+                    size,
+                };
+            }
+        }
+    }
+
     let optional_size = match &doc.optional {
         OptionalHeader::Bit32(_) => std::mem::size_of::<IMAGE_OPTIONAL_HEADER32>(),
         OptionalHeader::Bit64(_) => std::mem::size_of::<IMAGE_OPTIONAL_HEADER64>(),
