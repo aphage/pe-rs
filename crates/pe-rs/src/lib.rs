@@ -17,4 +17,7 @@ pub mod error;
 pub mod feature;
 pub mod io;
 
+#[cfg(target_os = "windows")]
+pub mod process;
+
 pub use error::{PeError, Result};

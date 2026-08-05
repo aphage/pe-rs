@@ -88,7 +88,8 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 - [x] LoadConfig directory parsing (view, CFG fields)
 - [x] LoadConfig directory editing
 - [x] Section merging across non-contiguous ranges (RVA remap)
-- [ ] Process-level features for the GUI (dump live process, inline hooks, tracer, ScyllaHide)
+- [x] Process dump + IAT resolution (`pe_rs::process`: `dump`, `ProcessResolver` — dump a live process and scan/fix its IAT)
+- [ ] Process hooks / tracer / ScyllaHide
 - [ ] GUI application (crates/pe-rs-gui)
 
 ## Development

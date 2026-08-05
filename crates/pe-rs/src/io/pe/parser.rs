@@ -53,7 +53,7 @@ fn u16_at(bytes: &[u8], off: usize) -> Result<u16> {
 }
 
 /// Read a `#[repr(C)]` structure from a byte slice at `off` (unaligned).
-fn read_struct<T>(bytes: &[u8], off: usize) -> Result<T> {
+pub(crate) fn read_struct<T>(bytes: &[u8], off: usize) -> Result<T> {
     let size = std::mem::size_of::<T>();
     let end = off
         .checked_add(size)
@@ -167,7 +167,8 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     Ok(doc)
 }
 
-fn parse_dos(bytes: &[u8]) -> Result<DosHeader> {
+/// Parse the DOS header. `pub(crate)` for the process-dump module.
+pub(crate) fn parse_dos(bytes: &[u8]) -> Result<DosHeader> {
     let h: IMAGE_DOS_HEADER = read_struct(bytes, 0)?;
     let e_lfanew = h.e_lfanew as usize;
     let stub = bytes.get(64..e_lfanew).unwrap_or(&[]).to_vec();
@@ -195,7 +196,8 @@ fn parse_dos(bytes: &[u8]) -> Result<DosHeader> {
     })
 }
 
-fn parse_coff(bytes: &[u8], off: usize) -> Result<CoffHeader> {
+/// Parse the COFF header at `off`. `pub(crate)` for the process-dump module.
+pub(crate) fn parse_coff(bytes: &[u8], off: usize) -> Result<CoffHeader> {
     let h: IMAGE_FILE_HEADER = read_struct(bytes, off)?;
     Ok(CoffHeader {
         machine: Machine::from_u16(h.Machine),
@@ -208,7 +210,7 @@ fn parse_coff(bytes: &[u8], off: usize) -> Result<CoffHeader> {
     })
 }
 
-fn parse_optional(
+pub(crate) fn parse_optional(
     bytes: &[u8],
     off: usize,
     size: usize,
@@ -299,7 +301,11 @@ fn parse_optional(
     }
 }
 
-fn parse_section_headers(bytes: &[u8], off: usize, n: usize) -> Result<Vec<SectionHeader>> {
+pub(crate) fn parse_section_headers(
+    bytes: &[u8],
+    off: usize,
+    n: usize,
+) -> Result<Vec<SectionHeader>> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let h: IMAGE_SECTION_HEADER = read_struct(bytes, off + i * 40)?;
