@@ -3,10 +3,10 @@
 
 mod common;
 
-use pe_rs::api::{PeEditor, PeViewer};
+use pe_rs::api::{DirectoryEditor, PeViewer};
 use pe_rs::domain::relocation::IMAGE_REL_BASED_HIGHLOW;
 use pe_rs::domain::resource::RT_MANIFEST;
-use pe_rs::domain::{DataDirectoryIndex, ResourceEntryData, ResourceName, Rva};
+use pe_rs::domain::{ResourceEntryData, ResourceName, Rva};
 use pe_rs::io::pe::{parse, serialize};
 use pe_rs::io::{MOCK_IMAGE_BASE, MOCK_RSRC_RVA};
 
@@ -90,13 +90,12 @@ fn tls_directory_is_parsed() {
 
 #[test]
 fn absent_directories_parse_to_none() {
+    // The rich form is the source of truth: clear it (via the editor API), then
+    // a saved file has no resource/reloc/TLS directories at all.
     let mut doc = common::doc_via_mock();
-    doc.set_data_directory(DataDirectoryIndex::Resource, Rva::NULL, 0)
-        .unwrap();
-    doc.set_data_directory(DataDirectoryIndex::BaseReloc, Rva::NULL, 0)
-        .unwrap();
-    doc.set_data_directory(DataDirectoryIndex::Tls, Rva::NULL, 0)
-        .unwrap();
+    doc.set_resources(None);
+    doc.set_relocations(None);
+    doc.set_tls(None);
 
     let bytes = serialize(&doc).unwrap();
     let reparsed = parse(&bytes).unwrap();

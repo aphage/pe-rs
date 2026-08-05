@@ -3,6 +3,7 @@
 //! [`crate::domain::PeDocument`], so they work identically for mock- and
 //! real-parser-backed documents.
 
+pub mod directory_editor;
 pub mod editor;
 pub mod iat_fixer;
 pub mod iat_scanner;
@@ -10,6 +11,7 @@ pub mod importer;
 pub mod resolver;
 pub mod viewer;
 
+pub use directory_editor::DirectoryEditor;
 pub use editor::PeEditor;
 pub use iat_fixer::IatFixer;
 pub use iat_scanner::IatScanner;

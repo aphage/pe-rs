@@ -19,9 +19,11 @@ use crate::domain::section::{
 use crate::domain::types::{RawOffset, Rva, align_up};
 use crate::error::Result;
 
+use super::directory_render;
 use super::export_render::render_export_table;
 use super::import_render::render_import_table;
 use super::parser;
+use super::write_struct;
 use windows_sys::Win32::System::Diagnostics::Debug::{
     IMAGE_DATA_DIRECTORY, IMAGE_FILE_HEADER, IMAGE_OPTIONAL_HEADER32, IMAGE_OPTIONAL_HEADER64,
     IMAGE_SECTION_HEADER, IMAGE_SECTION_HEADER_0,
@@ -108,6 +110,80 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
         }
     }
 
+    // Resource / relocation / TLS directories: same "reuse when the existing
+    // directory already matches the rich form" logic.
+    match &doc.resources {
+        None => dirs[DataDirectoryIndex::Resource.to_usize()] = DataDirectory::default(),
+        Some(root) => {
+            let resource_dir = dirs[DataDirectoryIndex::Resource.to_usize()];
+            let matches = resource_dir.rva != Rva::NULL
+                && parser::parse_resources_from_doc(doc, resource_dir)
+                    .map(|t| &t == root)
+                    .unwrap_or(false);
+            if !matches {
+                let base = align_up(image_end(&sections), section_alignment);
+                let blob = directory_render::render_resources(root)?;
+                let size = blob.len() as u32;
+                sections.push(Section {
+                    header: section_header_for(*b".persc\0\0", Rva(base), size as usize),
+                    data: blob,
+                });
+                dirs[DataDirectoryIndex::Resource.to_usize()] = DataDirectory {
+                    rva: Rva(base),
+                    size,
+                };
+            }
+        }
+    }
+
+    match &doc.relocations {
+        None => dirs[DataDirectoryIndex::BaseReloc.to_usize()] = DataDirectory::default(),
+        Some(table) => {
+            let reloc_dir = dirs[DataDirectoryIndex::BaseReloc.to_usize()];
+            let matches = reloc_dir.rva != Rva::NULL
+                && parser::parse_relocations_from_doc(doc, reloc_dir)
+                    .map(|t| &t == table)
+                    .unwrap_or(false);
+            if !matches {
+                let base = align_up(image_end(&sections), section_alignment);
+                let blob = directory_render::render_relocations(table);
+                let size = blob.len() as u32;
+                sections.push(Section {
+                    header: section_header_for(*b".perel\0\0", Rva(base), size as usize),
+                    data: blob,
+                });
+                dirs[DataDirectoryIndex::BaseReloc.to_usize()] = DataDirectory {
+                    rva: Rva(base),
+                    size,
+                };
+            }
+        }
+    }
+
+    match &doc.tls {
+        None => dirs[DataDirectoryIndex::Tls.to_usize()] = DataDirectory::default(),
+        Some(tls) => {
+            let tls_dir = dirs[DataDirectoryIndex::Tls.to_usize()];
+            let matches = tls_dir.rva != Rva::NULL
+                && parser::parse_tls_from_doc(doc, tls_dir)
+                    .map(|t| t == *tls)
+                    .unwrap_or(false);
+            if !matches {
+                let base = align_up(image_end(&sections), section_alignment);
+                let blob = directory_render::render_tls(tls, doc.arch);
+                let size = blob.len() as u32;
+                sections.push(Section {
+                    header: section_header_for(*b".petls\0\0", Rva(base), size as usize),
+                    data: blob,
+                });
+                dirs[DataDirectoryIndex::Tls.to_usize()] = DataDirectory {
+                    rva: Rva(base),
+                    size,
+                };
+            }
+        }
+    }
+
     let optional_size = match &doc.optional {
         OptionalHeader::Bit32(_) => std::mem::size_of::<IMAGE_OPTIONAL_HEADER32>(),
         OptionalHeader::Bit64(_) => std::mem::size_of::<IMAGE_OPTIONAL_HEADER64>(),
@@ -151,17 +227,6 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
         out.resize(out.len() + (size - s.data.len()), 0);
     }
     Ok(out)
-}
-
-/// Append the raw bytes of a fully-initialized `#[repr(C)]` structure.
-fn write_struct<T>(out: &mut Vec<u8>, value: &T) {
-    let size = std::mem::size_of::<T>();
-    // SAFETY: `value` is a fully-initialized plain structure (every field set,
-    // no padding to worry about — the `IMAGE_*` structs match the on-disk
-    // layout), so reading its bytes is sound. This mirrors the parser's
-    // `read_struct` in reverse.
-    let bytes = unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size) };
-    out.extend_from_slice(bytes);
 }
 
 fn section_header_for(name: [u8; 8], rva: Rva, len: usize) -> SectionHeader {
