@@ -3,7 +3,9 @@
 use crate::api::importer::ImportTableEditor;
 use crate::api::resolver::ImportResolver;
 use crate::domain::types::ptr_size;
-use crate::domain::{IatEntry, IatFixOptions, IatFixReport, IatScan, ImportDescriptor, PeDocument};
+use crate::domain::{
+    IatEntry, IatFixOptions, IatFixReport, IatScan, IatTable, ImportDescriptor, PeDocument,
+};
 use crate::error::{PeError, Result};
 
 /// Rebuilds a PE's import table from the addresses found in its IAT.
@@ -28,6 +30,25 @@ pub trait IatFixer {
         resolver: &dyn ImportResolver,
         options: &IatFixOptions,
     ) -> Result<IatFixReport>;
+
+    /// Rebuild the import table from a manually-curated [`IatTable`] — an
+    /// automatic scan merged with regions added by hand (for dumps whose IAT
+    /// was erased / split into non-contiguous segments). The rebuilt import
+    /// directory is a normal contiguous, per-module NULL-separated array.
+    fn fix_iat_table(
+        &mut self,
+        table: &IatTable,
+        resolver: &dyn ImportResolver,
+        options: &IatFixOptions,
+    ) -> Result<IatFixReport> {
+        if table.is_empty() {
+            return Err(PeError::InvalidArgument(
+                "fix_iat_table: empty table".into(),
+            ));
+        }
+        let scan = table.to_scan();
+        self.fix_iat(&scan, resolver, options)
+    }
 }
 
 impl IatFixer for PeDocument {

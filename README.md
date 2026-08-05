@@ -29,6 +29,9 @@ array** addition. It is the library a future GUI PE editor will be built on
   **redirect** the original IAT slots to the new thunks
 - `IatFixer::add_iat_array` — manually feed a caller-supplied array of IAT
   entries and rebuild from it
+- `IatTable` / `IatFixer::fix_iat_table` — curate an IAT by hand: add
+  non-contiguous regions (`add_region`, for erased / split IATs e.g. VMProtect),
+  drop false positives, then rebuild a normal contiguous import table
 - `rebuild_section_table` / `merge_sections` — section table rebuild and merge
 
 ## Architecture

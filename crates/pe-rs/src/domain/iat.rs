@@ -21,6 +21,109 @@ pub struct IatScan {
     pub entries: Vec<IatEntry>,
 }
 
+/// A manually-constructed IAT: a mutable set of `(rva, value)` slots that may
+/// come from several **non-contiguous** regions.
+///
+/// Protectors (e.g. VMProtect with memory-loaded modules) can erase and split
+/// the IAT across separate segments that the automatic scan only partially
+/// recovers. Build a table from the automatic scan and curate it — add missed
+/// regions with [`IatTable::add_region`], drop false positives — then rebuild
+/// with [`IatFixer::fix_iat_table`](crate::api::IatFixer::fix_iat_table). The
+/// rebuilt import table is a normal contiguous, per-module NULL-separated
+/// array.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IatTable {
+    entries: Vec<IatEntry>,
+}
+
+impl IatTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start from an automatic scan so it can be curated.
+    pub fn from_scan(scan: &IatScan) -> Self {
+        Self {
+            entries: scan.entries.clone(),
+        }
+    }
+
+    pub fn from_entries(entries: Vec<IatEntry>) -> Self {
+        Self { entries }
+    }
+
+    /// Append every slot in `[rva, rva + size)` (size in bytes), reading one
+    /// pointer per slot from the document. Lets you add IAT regions the
+    /// automatic scan missed.
+    pub fn add_region(
+        &mut self,
+        doc: &crate::domain::PeDocument,
+        rva: Rva,
+        size: usize,
+    ) -> crate::error::Result<()> {
+        let psize = crate::domain::types::ptr_size(doc.arch);
+        for off in (0..size).step_by(psize) {
+            let slot_rva = rva.checked_add(off as u32).ok_or_else(|| {
+                crate::error::PeError::InvalidArgument("add_region: region RVA overflow".into())
+            })?;
+            let bytes = doc.read(slot_rva, psize)?;
+            let value = if psize == 8 {
+                u64::from_le_bytes(bytes.try_into().unwrap())
+            } else {
+                u32::from_le_bytes(bytes.try_into().unwrap()) as u64
+            };
+            self.entries.push(IatEntry {
+                rva: slot_rva,
+                value,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn add(&mut self, entry: IatEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn add_many(&mut self, entries: &[IatEntry]) {
+        self.entries.extend_from_slice(entries);
+    }
+
+    /// Remove the first entry at `rva`.
+    pub fn remove(&mut self, rva: Rva) {
+        if let Some(i) = self.entries.iter().position(|e| e.rva == rva) {
+            self.entries.remove(i);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn entries(&self) -> &[IatEntry] {
+        &self.entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The entries sorted by RVA with duplicates removed.
+    pub fn to_scan(&self) -> IatScan {
+        let mut entries = self.entries.clone();
+        entries.sort_by_key(|e| e.rva);
+        entries.dedup_by_key(|e| e.rva);
+        IatScan {
+            base_rva: entries.first().map(|e| e.rva).unwrap_or(Rva::NULL),
+            size: entries.len(),
+            entries,
+        }
+    }
+}
+
 /// How the IAT scanner locates candidate slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScanMethod {
