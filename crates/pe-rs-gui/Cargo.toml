@@ -1,0 +1,12 @@
+[package]
+name = "pe-rs-gui"
+description = "Placeholder GUI consumer of the pe-rs library (Scylla-style PE editor)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pe-rs = { path = "../pe-rs" }
