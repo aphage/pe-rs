@@ -99,6 +99,13 @@ pub fn render_import_table(
         PeError::InvalidArgument("import table too large".into())
     });
 
+    // DLL name strings.
+    for (m, desc) in imports.iter().enumerate() {
+        let off = dll_name_off[m];
+        blob[off..off + desc.name.len()].copy_from_slice(desc.name.as_bytes());
+        blob[off + desc.name.len()] = 0;
+    }
+
     let mut fi = 0; // flattened function index
     for (m, desc) in imports.iter().enumerate() {
         // Descriptor.

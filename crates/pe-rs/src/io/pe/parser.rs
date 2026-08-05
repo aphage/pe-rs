@@ -64,8 +64,8 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     };
     let n = (nrs as usize).min(DataDirectoryIndex::COUNT);
     let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
-    for i in 0..n {
-        dirs[i] = DataDirectory {
+    for (i, slot) in dirs.iter_mut().take(n).enumerate() {
+        *slot = DataDirectory {
             rva: Rva(u32_at(bytes, dirs_off + i * 8)?),
             size: u32_at(bytes, dirs_off + i * 8 + 4)?,
         };
@@ -85,16 +85,12 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     // Rich directory parsing is lenient: a broken directory yields an empty
     // table instead of failing the whole file (viewer semantics).
     let import_dir = doc.data_directory(DataDirectoryIndex::Import).ok().copied();
-    if let Some(dd) = import_dir {
-        if dd.rva != Rva::NULL {
-            doc.imports = parse_imports(&doc, dd.rva).unwrap_or_default();
-        }
+    if let Some(dd) = import_dir.filter(|dd| dd.rva != Rva::NULL) {
+        doc.imports = parse_imports_from_doc(&doc, dd.rva).unwrap_or_default();
     }
     let export_dir = doc.data_directory(DataDirectoryIndex::Export).ok().copied();
-    if let Some(dd) = export_dir {
-        if dd.rva != Rva::NULL {
-            doc.exports = parse_exports(&doc, dd).ok().flatten();
-        }
+    if let Some(dd) = export_dir.filter(|dd| dd.rva != Rva::NULL) {
+        doc.exports = parse_exports_from_doc(&doc, dd).ok().flatten();
     }
 
     Ok(doc)
@@ -248,16 +244,19 @@ fn read_section(bytes: &[u8], sh: SectionHeader) -> Result<Section> {
     let mut data = if n > 0 { bytes[ptr..ptr + n].to_vec() } else { Vec::new() };
     let vs = sh.virtual_size as usize;
     if vs != 0 {
-        if data.len() > vs {
-            data.truncate(vs);
-        } else if data.len() < vs && vs <= MAX_SECTION_SIZE {
-            data.resize(vs, 0);
+        match data.len().cmp(&vs) {
+            std::cmp::Ordering::Greater => data.truncate(vs),
+            std::cmp::Ordering::Less if vs <= MAX_SECTION_SIZE => data.resize(vs, 0),
+            _ => {}
         }
     }
     Ok(Section { header: sh, data })
 }
 
-fn parse_imports(doc: &PeDocument, dir_rva: Rva) -> Result<Vec<ImportDescriptor>> {
+/// Parse the import table starting at `dir_rva` from an in-memory document.
+/// `pub(crate)` so the writer can check whether an existing directory still
+/// matches the document's rich imports (and skip re-rendering when it does).
+pub(crate) fn parse_imports_from_doc(doc: &PeDocument, dir_rva: Rva) -> Result<Vec<ImportDescriptor>> {
     let psize = ptr_size(doc.arch);
     let mut out = Vec::new();
     let mut i: usize = 0;
@@ -332,7 +331,8 @@ fn parse_thunks(doc: &PeDocument, thunk_rva: Rva, psize: usize) -> Result<Vec<Im
     Ok(out)
 }
 
-fn parse_exports(doc: &PeDocument, dd: DataDirectory) -> Result<Option<ExportTable>> {
+/// Parse the export table described by directory entry `dd`.
+pub(crate) fn parse_exports_from_doc(doc: &PeDocument, dd: DataDirectory) -> Result<Option<ExportTable>> {
     let d = doc.read(dd.rva, 40)?;
     let base = u32::from_le_bytes(d[16..20].try_into().unwrap());
     let number_of_functions = u32::from_le_bytes(d[20..24].try_into().unwrap());

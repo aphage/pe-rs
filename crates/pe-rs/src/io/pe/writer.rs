@@ -20,6 +20,7 @@ use crate::error::Result;
 
 use super::export_render::render_export_table;
 use super::import_render::render_import_table;
+use super::parser;
 
 const PE_SIGNATURE: [u8; 4] = *b"PE\0\0";
 
@@ -42,26 +43,43 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
             .unwrap_or(0)
     };
 
-    // Render the import table from the rich form.
-    if !doc.imports.is_empty() {
-        let base = align_up(image_end(&sections), section_alignment);
-        let rendered = render_import_table(&doc.imports, doc.arch, Rva(base))?;
-        sections.push(Section {
-            header: section_header_for(*b".peimp\0\0", Rva(base), rendered.blob.len()),
-            data: rendered.blob,
-        });
-        dirs[DataDirectoryIndex::Import.to_usize()] =
-            DataDirectory { rva: Rva(rendered.dir_rva), size: rendered.size };
-        dirs[DataDirectoryIndex::Iat.to_usize()] =
-            DataDirectory { rva: Rva(rendered.iat_rva), size: rendered.iat_size };
-    } else {
+    // Import table: re-render only when the document's rich imports are not
+    // already represented by an existing, matching import directory. This keeps
+    // serialization idempotent (a saved-and-reparsed document stays stable).
+    if doc.imports.is_empty() {
         dirs[DataDirectoryIndex::Import.to_usize()] = DataDirectory::default();
         dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory::default();
+    } else {
+        let import_dir = dirs[DataDirectoryIndex::Import.to_usize()];
+        let matches = import_dir.rva != Rva::NULL
+            && parser::parse_imports_from_doc(doc, import_dir.rva)
+                .map(|im| im == doc.imports)
+                .unwrap_or(false);
+        if !matches {
+            let base = align_up(image_end(&sections), section_alignment);
+            let rendered = render_import_table(&doc.imports, doc.arch, Rva(base))?;
+            sections.push(Section {
+                header: section_header_for(*b".peimp\0\0", Rva(base), rendered.blob.len()),
+                data: rendered.blob,
+            });
+            dirs[DataDirectoryIndex::Import.to_usize()] =
+                DataDirectory { rva: Rva(rendered.dir_rva), size: rendered.size };
+            dirs[DataDirectoryIndex::Iat.to_usize()] =
+                DataDirectory { rva: Rva(rendered.iat_rva), size: rendered.iat_size };
+        }
     }
 
-    // Render the export table from the rich form.
-    if let Some(exports) = &doc.exports {
-        if !exports.symbols.is_empty() {
+    // Export table: same "reuse when already matching" logic.
+    if doc.exports.is_none() {
+        dirs[DataDirectoryIndex::Export.to_usize()] = DataDirectory::default();
+    } else if let Some(exports) = &doc.exports {
+        let export_dir = dirs[DataDirectoryIndex::Export.to_usize()];
+        let matches = !exports.symbols.is_empty()
+            && export_dir.rva != Rva::NULL
+            && parser::parse_exports_from_doc(doc, export_dir)
+                .map(|e| e == doc.exports)
+                .unwrap_or(false);
+        if !matches {
             let base = align_up(image_end(&sections), section_alignment);
             let rendered = render_export_table(exports, Rva(base))?;
             sections.push(Section {
@@ -71,8 +89,6 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
             dirs[DataDirectoryIndex::Export.to_usize()] =
                 DataDirectory { rva: Rva(rendered.rva), size: rendered.size };
         }
-    } else {
-        dirs[DataDirectoryIndex::Export.to_usize()] = DataDirectory::default();
     }
 
     let optional_struct_len = match &doc.optional {
@@ -113,7 +129,7 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
             out.resize(ptr, 0);
         }
         out.extend_from_slice(&s.data);
-        out.extend(std::iter::repeat(0u8).take(size - s.data.len()));
+        out.resize(out.len() + (size - s.data.len()), 0);
     }
     Ok(out)
 }

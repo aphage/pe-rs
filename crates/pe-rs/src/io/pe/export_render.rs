@@ -31,7 +31,7 @@ pub fn render_export_table(exports: &ExportTable, base_rva: Rva) -> Result<Rende
     syms.sort_by_key(|s| s.ordinal);
     let named: Vec<&ExportSymbol> = syms.iter().filter(|s| s.name.is_some()).cloned().collect();
 
-    let n_funcs = syms.len() as usize;
+    let n_funcs = syms.len();
     let funcs_off = 40usize;
     let names_off = funcs_off + n_funcs * 4;
     let ordinals_off = names_off + named.len() * 4;
