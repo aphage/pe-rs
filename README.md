@@ -95,7 +95,8 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 - [x] Section merging across non-contiguous ranges (RVA remap)
 - [x] Process dump + IAT resolution (`pe_rs::process`: `dump`, `ProcessResolver` — dump a live process and scan/fix its IAT; `with_fingerprints` resolves addresses in **memory-loaded** (manually mapped) modules by matching code against the system-loaded copy, for protectors that erase or split the IAT)
 - [ ] Process hooks / tracer / ScyllaHide
-- [ ] GUI application (crates/pe-rs-gui)
+- [x] GUI application (crates/pe-rs-gui: view headers/sections/imports/exports/
+  directories, dump a process, scan & fix its IAT, save)
 
 ## Development
 
