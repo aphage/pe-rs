@@ -18,6 +18,10 @@ pub enum PeError {
     #[error("unsupported: {0}")]
     Unsupported(String),
 
+    /// A searched-for item was not found (e.g. no IAT candidate).
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// A caller-supplied argument is invalid.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
