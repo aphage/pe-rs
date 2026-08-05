@@ -86,8 +86,8 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 - [x] Resource / relocation / TLS directory parsing (view)
 - [x] Resource / relocation / TLS directory editing (`DirectoryEditor`)
 - [x] LoadConfig directory parsing (view, CFG fields)
-- [ ] LoadConfig directory editing
-- [ ] Section merging across non-contiguous ranges (RVA remap)
+- [x] LoadConfig directory editing
+- [x] Section merging across non-contiguous ranges (RVA remap)
 - [ ] Process-level features for the GUI (dump live process, inline hooks, tracer, ScyllaHide)
 - [ ] GUI application (crates/pe-rs-gui)
 
