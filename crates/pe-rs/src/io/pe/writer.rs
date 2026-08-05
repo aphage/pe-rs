@@ -3,8 +3,10 @@
 //! The writer re-renders the import and export tables from the document's rich
 //! form into dedicated `.peimp` / `.peexp` sections (the Scylla-style rebuild),
 //! then serializes headers + section data with recomputed raw offsets/sizes.
-//! This means `parse(serialize(doc))` preserves the document's *content*
-//! (headers, section data, imports, exports) while the file layout is canonical.
+//! On-disk headers are encoded through the official `windows-sys` `IMAGE_*`
+//! structs (mirroring the parser). This means `parse(serialize(doc))` preserves
+//! the document's *content* (headers, section data, imports, exports) while the
+//! file layout is canonical.
 
 use crate::domain::PeDocument;
 use crate::domain::coff::CoffHeader;
@@ -20,6 +22,11 @@ use crate::error::Result;
 use super::export_render::render_export_table;
 use super::import_render::render_import_table;
 use super::parser;
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    IMAGE_DATA_DIRECTORY, IMAGE_FILE_HEADER, IMAGE_OPTIONAL_HEADER32, IMAGE_OPTIONAL_HEADER64,
+    IMAGE_SECTION_HEADER, IMAGE_SECTION_HEADER_0,
+};
+use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 
 const PE_SIGNATURE: [u8; 4] = *b"PE\0\0";
 
@@ -101,12 +108,11 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
         }
     }
 
-    let optional_struct_len = match &doc.optional {
-        OptionalHeader::Bit32(_) => 96,
-        OptionalHeader::Bit64(_) => 112,
+    let optional_size = match &doc.optional {
+        OptionalHeader::Bit32(_) => std::mem::size_of::<IMAGE_OPTIONAL_HEADER32>(),
+        OptionalHeader::Bit64(_) => std::mem::size_of::<IMAGE_OPTIONAL_HEADER64>(),
     };
-    let optional_full_len = optional_struct_len + DataDirectoryIndex::COUNT * 8;
-    let head_end = 64 + doc.dos.stub.len() + 4 + 20 + optional_full_len + 40 * sections.len();
+    let head_end = 64 + doc.dos.stub.len() + 4 + 20 + optional_size + 40 * sections.len();
     let size_of_headers = align_up(head_end as u32, file_alignment);
     let size_of_image = align_up(image_end(&sections), section_alignment);
 
@@ -147,6 +153,17 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Append the raw bytes of a fully-initialized `#[repr(C)]` structure.
+fn write_struct<T>(out: &mut Vec<u8>, value: &T) {
+    let size = std::mem::size_of::<T>();
+    // SAFETY: `value` is a fully-initialized plain structure (every field set,
+    // no padding to worry about — the `IMAGE_*` structs match the on-disk
+    // layout), so reading its bytes is sound. This mirrors the parser's
+    // `read_struct` in reverse.
+    let bytes = unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size) };
+    out.extend_from_slice(bytes);
+}
+
 fn section_header_for(name: [u8; 8], rva: Rva, len: usize) -> SectionHeader {
     SectionHeader {
         name,
@@ -159,32 +176,31 @@ fn section_header_for(name: [u8; 8], rva: Rva, len: usize) -> SectionHeader {
 }
 
 fn encode_dos(dos: &DosHeader) -> Vec<u8> {
-    let mut b = Vec::with_capacity(64 + dos.stub.len());
-    b.extend_from_slice(&dos.e_magic.to_le_bytes());
-    b.extend_from_slice(&dos.e_cblp.to_le_bytes());
-    b.extend_from_slice(&dos.e_cp.to_le_bytes());
-    b.extend_from_slice(&dos.e_crlc.to_le_bytes());
-    b.extend_from_slice(&dos.e_cparhdr.to_le_bytes());
-    b.extend_from_slice(&dos.e_minalloc.to_le_bytes());
-    b.extend_from_slice(&dos.e_maxalloc.to_le_bytes());
-    b.extend_from_slice(&dos.e_ss.to_le_bytes());
-    b.extend_from_slice(&dos.e_sp.to_le_bytes());
-    b.extend_from_slice(&dos.e_csum.to_le_bytes());
-    b.extend_from_slice(&dos.e_ip.to_le_bytes());
-    b.extend_from_slice(&dos.e_cs.to_le_bytes());
-    b.extend_from_slice(&dos.e_lfarlc.to_le_bytes());
-    b.extend_from_slice(&dos.e_ovno.to_le_bytes());
-    for v in dos.e_res {
-        b.extend_from_slice(&v.to_le_bytes());
-    }
-    b.extend_from_slice(&dos.e_oemid.to_le_bytes());
-    b.extend_from_slice(&dos.e_oeminfo.to_le_bytes());
-    for v in dos.e_res2 {
-        b.extend_from_slice(&v.to_le_bytes());
-    }
-    b.extend_from_slice(&((64 + dos.stub.len()) as u32).to_le_bytes()); // e_lfanew
-    b.extend_from_slice(&dos.stub);
-    b
+    let h = IMAGE_DOS_HEADER {
+        e_magic: dos.e_magic,
+        e_cblp: dos.e_cblp,
+        e_cp: dos.e_cp,
+        e_crlc: dos.e_crlc,
+        e_cparhdr: dos.e_cparhdr,
+        e_minalloc: dos.e_minalloc,
+        e_maxalloc: dos.e_maxalloc,
+        e_ss: dos.e_ss,
+        e_sp: dos.e_sp,
+        e_csum: dos.e_csum,
+        e_ip: dos.e_ip,
+        e_cs: dos.e_cs,
+        e_lfarlc: dos.e_lfarlc,
+        e_ovno: dos.e_ovno,
+        e_res: dos.e_res,
+        e_oemid: dos.e_oemid,
+        e_oeminfo: dos.e_oeminfo,
+        e_res2: dos.e_res2,
+        e_lfanew: (64 + dos.stub.len()) as i32,
+    };
+    let mut out = Vec::with_capacity(64 + dos.stub.len());
+    write_struct(&mut out, &h);
+    out.extend_from_slice(&dos.stub);
+    out
 }
 
 fn encode_coff(
@@ -192,30 +208,38 @@ fn encode_coff(
     number_of_sections: u16,
     size_of_optional_header: u16,
 ) -> Vec<u8> {
-    let mut b = Vec::with_capacity(20);
-    b.extend_from_slice(&coff.machine.to_u16().to_le_bytes());
-    b.extend_from_slice(&number_of_sections.to_le_bytes());
-    b.extend_from_slice(&coff.time_date_stamp.to_le_bytes());
-    b.extend_from_slice(&coff.pointer_to_symbol_table.to_le_bytes());
-    b.extend_from_slice(&coff.number_of_symbols.to_le_bytes());
-    b.extend_from_slice(&size_of_optional_header.to_le_bytes());
-    b.extend_from_slice(&coff.characteristics.to_le_bytes());
-    b
+    let h = IMAGE_FILE_HEADER {
+        Machine: coff.machine.to_u16(),
+        NumberOfSections: number_of_sections,
+        TimeDateStamp: coff.time_date_stamp,
+        PointerToSymbolTable: coff.pointer_to_symbol_table,
+        NumberOfSymbols: coff.number_of_symbols,
+        SizeOfOptionalHeader: size_of_optional_header,
+        Characteristics: coff.characteristics,
+    };
+    let mut out = Vec::with_capacity(20);
+    write_struct(&mut out, &h);
+    out
 }
 
 fn encode_section_header(sh: &SectionHeader, size_of_raw_data: u32, ptr: RawOffset) -> Vec<u8> {
-    let mut b = Vec::with_capacity(40);
-    b.extend_from_slice(&sh.name);
-    b.extend_from_slice(&sh.virtual_size.to_le_bytes());
-    b.extend_from_slice(&sh.virtual_address.get().to_le_bytes());
-    b.extend_from_slice(&size_of_raw_data.to_le_bytes());
-    b.extend_from_slice(&ptr.get().to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes()); // pointer to relocations
-    b.extend_from_slice(&0u32.to_le_bytes()); // pointer to line numbers
-    b.extend_from_slice(&0u16.to_le_bytes()); // number of relocations
-    b.extend_from_slice(&0u16.to_le_bytes()); // number of line numbers
-    b.extend_from_slice(&sh.characteristics.to_le_bytes());
-    b
+    let h = IMAGE_SECTION_HEADER {
+        Name: sh.name,
+        Misc: IMAGE_SECTION_HEADER_0 {
+            VirtualSize: sh.virtual_size,
+        },
+        VirtualAddress: sh.virtual_address.get(),
+        SizeOfRawData: size_of_raw_data,
+        PointerToRawData: ptr.get(),
+        PointerToRelocations: 0,
+        PointerToLinenumbers: 0,
+        NumberOfRelocations: 0,
+        NumberOfLinenumbers: 0,
+        Characteristics: sh.characteristics,
+    };
+    let mut out = Vec::with_capacity(40);
+    write_struct(&mut out, &h);
+    out
 }
 
 fn encode_optional(
@@ -224,76 +248,95 @@ fn encode_optional(
     size_of_image: u32,
     dirs: &[DataDirectory],
 ) -> Vec<u8> {
-    let mut b = Vec::new();
+    let mut out = Vec::new();
     match optional {
         OptionalHeader::Bit32(h) => {
-            b.extend_from_slice(&h.magic.to_le_bytes());
-            b.push(h.major_linker_version);
-            b.push(h.minor_linker_version);
-            b.extend_from_slice(&h.size_of_code.to_le_bytes());
-            b.extend_from_slice(&h.size_of_initialized_data.to_le_bytes());
-            b.extend_from_slice(&h.size_of_uninitialized_data.to_le_bytes());
-            b.extend_from_slice(&h.address_of_entry_point.get().to_le_bytes());
-            b.extend_from_slice(&h.base_of_code.get().to_le_bytes());
-            b.extend_from_slice(&h.base_of_data.get().to_le_bytes());
-            b.extend_from_slice(&h.image_base.to_le_bytes());
-            b.extend_from_slice(&h.section_alignment.to_le_bytes());
-            b.extend_from_slice(&h.file_alignment.to_le_bytes());
-            b.extend_from_slice(&h.major_operating_system_version.to_le_bytes());
-            b.extend_from_slice(&h.minor_operating_system_version.to_le_bytes());
-            b.extend_from_slice(&h.major_image_version.to_le_bytes());
-            b.extend_from_slice(&h.minor_image_version.to_le_bytes());
-            b.extend_from_slice(&h.major_subsystem_version.to_le_bytes());
-            b.extend_from_slice(&h.minor_subsystem_version.to_le_bytes());
-            b.extend_from_slice(&h.win32_version_value.to_le_bytes());
-            b.extend_from_slice(&size_of_image.to_le_bytes());
-            b.extend_from_slice(&size_of_headers.to_le_bytes());
-            b.extend_from_slice(&h.checksum.to_le_bytes());
-            b.extend_from_slice(&h.subsystem.to_le_bytes());
-            b.extend_from_slice(&h.dll_characteristics.to_le_bytes());
-            b.extend_from_slice(&h.size_of_stack_reserve.to_le_bytes());
-            b.extend_from_slice(&h.size_of_stack_commit.to_le_bytes());
-            b.extend_from_slice(&h.size_of_heap_reserve.to_le_bytes());
-            b.extend_from_slice(&h.size_of_heap_commit.to_le_bytes());
-            b.extend_from_slice(&h.loader_flags.to_le_bytes());
-            b.extend_from_slice(&(DataDirectoryIndex::COUNT as u32).to_le_bytes());
+            let oh = IMAGE_OPTIONAL_HEADER32 {
+                Magic: h.magic,
+                MajorLinkerVersion: h.major_linker_version,
+                MinorLinkerVersion: h.minor_linker_version,
+                SizeOfCode: h.size_of_code,
+                SizeOfInitializedData: h.size_of_initialized_data,
+                SizeOfUninitializedData: h.size_of_uninitialized_data,
+                AddressOfEntryPoint: h.address_of_entry_point.get(),
+                BaseOfCode: h.base_of_code.get(),
+                BaseOfData: h.base_of_data.get(),
+                ImageBase: h.image_base,
+                SectionAlignment: h.section_alignment,
+                FileAlignment: h.file_alignment,
+                MajorOperatingSystemVersion: h.major_operating_system_version,
+                MinorOperatingSystemVersion: h.minor_operating_system_version,
+                MajorImageVersion: h.major_image_version,
+                MinorImageVersion: h.minor_image_version,
+                MajorSubsystemVersion: h.major_subsystem_version,
+                MinorSubsystemVersion: h.minor_subsystem_version,
+                Win32VersionValue: h.win32_version_value,
+                SizeOfImage: size_of_image,
+                SizeOfHeaders: size_of_headers,
+                CheckSum: h.checksum,
+                Subsystem: h.subsystem,
+                DllCharacteristics: h.dll_characteristics,
+                SizeOfStackReserve: h.size_of_stack_reserve,
+                SizeOfStackCommit: h.size_of_stack_commit,
+                SizeOfHeapReserve: h.size_of_heap_reserve,
+                SizeOfHeapCommit: h.size_of_heap_commit,
+                LoaderFlags: h.loader_flags,
+                NumberOfRvaAndSizes: DataDirectoryIndex::COUNT as u32,
+                DataDirectory: fill_dirs(dirs),
+            };
+            write_struct(&mut out, &oh);
         }
         OptionalHeader::Bit64(h) => {
-            b.extend_from_slice(&h.magic.to_le_bytes());
-            b.push(h.major_linker_version);
-            b.push(h.minor_linker_version);
-            b.extend_from_slice(&h.size_of_code.to_le_bytes());
-            b.extend_from_slice(&h.size_of_initialized_data.to_le_bytes());
-            b.extend_from_slice(&h.size_of_uninitialized_data.to_le_bytes());
-            b.extend_from_slice(&h.address_of_entry_point.get().to_le_bytes());
-            b.extend_from_slice(&h.base_of_code.get().to_le_bytes());
-            b.extend_from_slice(&h.image_base.to_le_bytes());
-            b.extend_from_slice(&h.section_alignment.to_le_bytes());
-            b.extend_from_slice(&h.file_alignment.to_le_bytes());
-            b.extend_from_slice(&h.major_operating_system_version.to_le_bytes());
-            b.extend_from_slice(&h.minor_operating_system_version.to_le_bytes());
-            b.extend_from_slice(&h.major_image_version.to_le_bytes());
-            b.extend_from_slice(&h.minor_image_version.to_le_bytes());
-            b.extend_from_slice(&h.major_subsystem_version.to_le_bytes());
-            b.extend_from_slice(&h.minor_subsystem_version.to_le_bytes());
-            b.extend_from_slice(&h.win32_version_value.to_le_bytes());
-            b.extend_from_slice(&size_of_image.to_le_bytes());
-            b.extend_from_slice(&size_of_headers.to_le_bytes());
-            b.extend_from_slice(&h.checksum.to_le_bytes());
-            b.extend_from_slice(&h.subsystem.to_le_bytes());
-            b.extend_from_slice(&h.dll_characteristics.to_le_bytes());
-            b.extend_from_slice(&h.size_of_stack_reserve.to_le_bytes());
-            b.extend_from_slice(&h.size_of_stack_commit.to_le_bytes());
-            b.extend_from_slice(&h.size_of_heap_reserve.to_le_bytes());
-            b.extend_from_slice(&h.size_of_heap_commit.to_le_bytes());
-            b.extend_from_slice(&h.loader_flags.to_le_bytes());
-            b.extend_from_slice(&(DataDirectoryIndex::COUNT as u32).to_le_bytes());
+            let oh = IMAGE_OPTIONAL_HEADER64 {
+                Magic: h.magic,
+                MajorLinkerVersion: h.major_linker_version,
+                MinorLinkerVersion: h.minor_linker_version,
+                SizeOfCode: h.size_of_code,
+                SizeOfInitializedData: h.size_of_initialized_data,
+                SizeOfUninitializedData: h.size_of_uninitialized_data,
+                AddressOfEntryPoint: h.address_of_entry_point.get(),
+                BaseOfCode: h.base_of_code.get(),
+                ImageBase: h.image_base,
+                SectionAlignment: h.section_alignment,
+                FileAlignment: h.file_alignment,
+                MajorOperatingSystemVersion: h.major_operating_system_version,
+                MinorOperatingSystemVersion: h.minor_operating_system_version,
+                MajorImageVersion: h.major_image_version,
+                MinorImageVersion: h.minor_image_version,
+                MajorSubsystemVersion: h.major_subsystem_version,
+                MinorSubsystemVersion: h.minor_subsystem_version,
+                Win32VersionValue: h.win32_version_value,
+                SizeOfImage: size_of_image,
+                SizeOfHeaders: size_of_headers,
+                CheckSum: h.checksum,
+                Subsystem: h.subsystem,
+                DllCharacteristics: h.dll_characteristics,
+                SizeOfStackReserve: h.size_of_stack_reserve,
+                SizeOfStackCommit: h.size_of_stack_commit,
+                SizeOfHeapReserve: h.size_of_heap_reserve,
+                SizeOfHeapCommit: h.size_of_heap_commit,
+                LoaderFlags: h.loader_flags,
+                NumberOfRvaAndSizes: DataDirectoryIndex::COUNT as u32,
+                DataDirectory: fill_dirs(dirs),
+            };
+            write_struct(&mut out, &oh);
         }
     }
-    for i in 0..DataDirectoryIndex::COUNT {
-        let dd = dirs.get(i).copied().unwrap_or_default();
-        b.extend_from_slice(&dd.rva.get().to_le_bytes());
-        b.extend_from_slice(&dd.size.to_le_bytes());
+    out
+}
+
+fn fill_dirs(dirs: &[DataDirectory]) -> [IMAGE_DATA_DIRECTORY; 16] {
+    let mut arr = [IMAGE_DATA_DIRECTORY {
+        VirtualAddress: 0,
+        Size: 0,
+    }; 16];
+    for (i, slot) in arr.iter_mut().enumerate() {
+        if let Some(dd) = dirs.get(i) {
+            *slot = IMAGE_DATA_DIRECTORY {
+                VirtualAddress: dd.rva.get(),
+                Size: dd.size,
+            };
+        }
     }
-    b
+    arr
 }
