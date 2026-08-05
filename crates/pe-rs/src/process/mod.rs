@@ -196,7 +196,13 @@ pub fn dump(pid: u32) -> Result<PeDocument> {
 /// module's export table from process memory. This is the resolver a GUI would
 /// use to scan / fix the IAT of a dumped process.
 pub struct ProcessResolver {
+    pid: u32,
     modules: Vec<ModuleExports>,
+    /// Code fingerprint of every named export of the system-loaded modules,
+    /// used to resolve addresses in *memory-loaded* (manually mapped) modules
+    /// that the OS module list does not report. Empty unless
+    /// [`ProcessResolver::with_fingerprints`] was called.
+    fingerprints: HashMap<u64, Vec<FingerprintCandidate>>,
 }
 
 struct ModuleExports {
@@ -207,23 +213,66 @@ struct ModuleExports {
     functions: HashMap<u32, ImportFunction>,
 }
 
+/// An export's first 16 code bytes, for matching memory-loaded modules.
+struct FingerprintCandidate {
+    module: String,
+    function: ImportFunction,
+    prefix: [u8; 16],
+}
+
 impl ProcessResolver {
     /// Enumerate `pid`'s loaded modules and read their exports.
     pub fn for_process(pid: u32) -> Result<Self> {
         let handle = open_process(pid)?;
         let modules = unsafe { enumerate_modules(handle, pid)? };
         unsafe { CloseHandle(handle) };
-        Ok(Self { modules })
+        Ok(Self {
+            pid,
+            modules,
+            fingerprints: HashMap::new(),
+        })
+    }
+
+    /// Also record the code fingerprint of every export, enabling resolution
+    /// of addresses in memory-loaded (manually mapped) modules via
+    /// [`ProcessResolver::resolve_fingerprint`].
+    pub fn with_fingerprints(mut self) -> Result<Self> {
+        self.fingerprints = build_fingerprints(self.pid, &self.modules);
+        Ok(self)
     }
 
     /// The names of all loaded modules (for diagnostics).
     pub fn module_names(&self) -> Vec<String> {
         self.modules.iter().map(|m| m.name.clone()).collect()
     }
+
+    /// Resolve `address` by matching its code bytes against the exports of the
+    /// system-loaded modules. This works for **memory-loaded** (manually
+    /// mapped) modules that `EnumProcessModules` does not report — their code
+    /// is byte-identical to the system copy, even if the PE header was erased.
+    /// Requires [`ProcessResolver::with_fingerprints`].
+    pub fn resolve_fingerprint(&self, address: u64) -> Option<ResolvedImport> {
+        let bytes = read_memory(self.pid, address, 16).ok()?;
+        if bytes.len() < 16 {
+            return None;
+        }
+        let key = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let candidates = self.fingerprints.get(&key)?;
+        for c in candidates {
+            if c.prefix[8..] == bytes[8..] {
+                return Some(ResolvedImport {
+                    module: c.module.clone(),
+                    function: c.function.clone(),
+                });
+            }
+        }
+        None
+    }
 }
 
 impl ImportResolver for ProcessResolver {
     fn resolve(&self, address: u64) -> Option<ResolvedImport> {
+        // Fast path: the address is inside an OS-loaded module.
         for m in &self.modules {
             if address >= m.base && address < m.base + m.size as u64 {
                 let off = (address - m.base) as u32;
@@ -233,8 +282,39 @@ impl ImportResolver for ProcessResolver {
                 });
             }
         }
-        None
+        // Fallback: a memory-loaded module (manual mapping) not reported by the
+        // OS — resolve by matching the code against the system-loaded copy.
+        self.resolve_fingerprint(address)
     }
+}
+
+/// Read the first 16 code bytes of every named export of each loaded module
+/// and index them by their leading 8 bytes.
+fn build_fingerprints(
+    pid: u32,
+    modules: &[ModuleExports],
+) -> HashMap<u64, Vec<FingerprintCandidate>> {
+    let mut map: HashMap<u64, Vec<FingerprintCandidate>> = HashMap::new();
+    for m in modules {
+        for (off, function) in &m.functions {
+            let Ok(bytes) = read_memory(pid, m.base + *off as u64, 16) else {
+                continue;
+            };
+            if bytes.len() < 16 {
+                continue;
+            }
+            let mut prefix = [0u8; 16];
+            prefix.copy_from_slice(&bytes[..16]);
+            map.entry(u64::from_le_bytes(prefix[0..8].try_into().unwrap()))
+                .or_default()
+                .push(FingerprintCandidate {
+                    module: m.name.clone(),
+                    function: function.clone(),
+                    prefix,
+                });
+        }
+    }
+    map
 }
 
 /// SAFETY: calls into `EnumProcessModules` / `GetModuleInformation` /
