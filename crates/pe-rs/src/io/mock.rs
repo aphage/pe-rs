@@ -75,8 +75,26 @@ pub fn document() -> PeDocument {
     let imports = mock_imports();
     let flat = flat_imports();
 
-    // `.text`: a NOP sled; purely decorative for now.
-    let text_data = vec![0x90u8; 0x100];
+    // `.text`: a NOP sled with six instructions that reference the IAT slots,
+    // so the opcode-pattern scanner can locate the IAT from code references.
+    // Even slots use `call [rip+disp]` (FF 15), odd slots `mov rax, [rip+disp]`
+    // (48 8B 05) — covering both rip-relative patterns.
+    let mut text_data = vec![0x90u8; 0x100];
+    for i in 0..6usize {
+        let insn_rva = MOCK_TEXT_RVA + (i as u32) * 8;
+        let slot_rva = MOCK_IAT_RVA + (i as u32) * 8;
+        let off = i * 8;
+        if i % 2 == 0 {
+            let disp = slot_rva as i64 - (insn_rva + 6) as i64;
+            text_data[off] = 0xFF;
+            text_data[off + 1] = 0x15;
+            text_data[off + 2..off + 6].copy_from_slice(&(disp as i32).to_le_bytes());
+        } else {
+            let disp = slot_rva as i64 - (insn_rva + 7) as i64;
+            text_data[off..off + 3].copy_from_slice(&[0x48, 0x8B, 0x05]);
+            text_data[off + 3..off + 7].copy_from_slice(&(disp as i32).to_le_bytes());
+        }
+    }
     let text = Section {
         header: SectionHeader {
             name: *b".text\0\0\0",

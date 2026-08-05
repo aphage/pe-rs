@@ -77,9 +77,9 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 ## Roadmap
 
 - [x] Phase 0–5 — scaffold, outer API + domain model, mock, contract tests, real parser/writer (round-trip stable)
-- [x] Phase 6–8 — IAT scanner, IAT fixer (import table rebuild + redirect), manual IAT array
+- [x] Phase 6–8 — IAT scanner (resolver + opcode-pattern), IAT fixer (import table rebuild + redirect), manual IAT array
 - [x] Phase 9 — Raw↔VA conversion, section table rebuild/merge
-- [ ] Opcode-pattern IAT scan (`ScanMethod::OpcodePattern`)
+- [x] Opcode-pattern IAT scan (`ScanMethod::OpcodePattern`)
 - [ ] Rich parsing/editing of resource / relocation / TLS / LoadConfig directories
 - [ ] Section merging across non-contiguous ranges (RVA remap)
 - [ ] Process-level features for the GUI (dump live process, inline hooks, tracer, ScyllaHide)

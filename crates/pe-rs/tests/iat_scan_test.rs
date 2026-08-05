@@ -5,7 +5,7 @@ mod common;
 
 use pe_rs::api::IatScanner;
 use pe_rs::domain::{Rva, ScanMethod, ScanOptions};
-use pe_rs::io::{MOCK_APIS_BASE, MOCK_IAT_RVA, MockResolver};
+use pe_rs::io::{MOCK_APIS_BASE, MOCK_IAT_RVA, MOCK_IDATA_RVA, MOCK_TEXT_RVA, MockResolver};
 
 #[test]
 fn scan_finds_mock_iat_over_whole_image() {
@@ -62,11 +62,54 @@ fn scan_ignores_unresolvable_region() {
 }
 
 #[test]
-fn opcode_pattern_method_is_not_yet_implemented() {
+fn opcode_scan_finds_iat_via_code_references() {
+    // The mock .text contains `call [rip+disp]` / `mov rax, [rip+disp]`
+    // instructions referencing the six IAT slots.
     let resolver = MockResolver::new();
     common::both(|doc| {
         let opts = ScanOptions {
             method: ScanMethod::OpcodePattern,
+            ..Default::default()
+        };
+        let scan = doc.scan(&resolver, &opts).unwrap();
+        assert_eq!(scan.base_rva.get(), MOCK_IAT_RVA);
+        assert_eq!(scan.entries.len(), 6);
+        assert_eq!(scan.entries[0].value, MOCK_APIS_BASE);
+    });
+}
+
+#[test]
+fn opcode_scan_respects_region_and_min_entries() {
+    let resolver = MockResolver::new();
+    common::both(|doc| {
+        // Restrict to the part of .text holding the references.
+        let opts = ScanOptions {
+            method: ScanMethod::OpcodePattern,
+            region: Some((Rva(MOCK_TEXT_RVA), 0x40)),
+            min_entries: 6,
+        };
+        let scan = doc.scan(&resolver, &opts).unwrap();
+        assert_eq!(scan.base_rva.get(), MOCK_IAT_RVA);
+        assert_eq!(scan.entries.len(), 6);
+
+        // min_entries above the run length -> not found.
+        let opts = ScanOptions {
+            method: ScanMethod::OpcodePattern,
+            region: Some((Rva(MOCK_TEXT_RVA), 0x40)),
+            min_entries: 100,
+        };
+        assert!(doc.scan(&resolver, &opts).is_err());
+    });
+}
+
+#[test]
+fn opcode_scan_with_no_code_references_errors() {
+    let resolver = MockResolver::new();
+    common::both(|doc| {
+        // .idata holds no opcode references.
+        let opts = ScanOptions {
+            method: ScanMethod::OpcodePattern,
+            region: Some((Rva(MOCK_IDATA_RVA), 0x100)),
             ..Default::default()
         };
         assert!(doc.scan(&resolver, &opts).is_err());
