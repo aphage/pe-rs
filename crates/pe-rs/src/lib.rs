@@ -14,6 +14,7 @@
 pub mod api;
 pub mod domain;
 pub mod error;
+pub mod feature;
 pub mod io;
 
 pub use error::{PeError, Result};
