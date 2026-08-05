@@ -10,6 +10,7 @@ use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
 use crate::domain::dos::{DOS_MAGIC, DosHeader};
 use crate::domain::export::{ExportSymbol, ExportTable};
 use crate::domain::import::{ImportDescriptor, ImportFunction};
+use crate::domain::load_config::LoadConfigDirectory;
 use crate::domain::optional::{
     OptionalHeader, OptionalHeader32, OptionalHeader64, PE32_MAGIC, PE32_PLUS_MAGIC,
 };
@@ -22,7 +23,8 @@ use crate::domain::tls::TlsDirectory;
 use crate::domain::types::{Machine, RawOffset, Rva, ptr_size};
 use crate::error::{PeError, Result};
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    IMAGE_DATA_DIRECTORY, IMAGE_FILE_HEADER, IMAGE_OPTIONAL_HEADER32, IMAGE_OPTIONAL_HEADER64,
+    IMAGE_DATA_DIRECTORY, IMAGE_FILE_HEADER, IMAGE_LOAD_CONFIG_DIRECTORY32,
+    IMAGE_LOAD_CONFIG_DIRECTORY64, IMAGE_OPTIONAL_HEADER32, IMAGE_OPTIONAL_HEADER64,
     IMAGE_SECTION_HEADER,
 };
 use windows_sys::Win32::System::SystemServices::{
@@ -123,6 +125,7 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
         resources: None,
         relocations: None,
         tls: None,
+        load_config: None,
     };
 
     // Rich directory parsing is lenient: a broken directory yields an empty
@@ -152,6 +155,13 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     let tls_dir = doc.data_directory(DataDirectoryIndex::Tls).ok().copied();
     if let Some(dd) = tls_dir.filter(|dd| dd.rva != Rva::NULL) {
         doc.tls = parse_tls_from_doc(&doc, dd).ok();
+    }
+    let load_config_dir = doc
+        .data_directory(DataDirectoryIndex::LoadConfig)
+        .ok()
+        .copied();
+    if let Some(dd) = load_config_dir.filter(|dd| dd.rva != Rva::NULL) {
+        doc.load_config = parse_load_config_from_doc(&doc, dd).ok();
     }
 
     Ok(doc)
@@ -659,5 +669,120 @@ pub(crate) fn parse_tls_from_doc(doc: &PeDocument, dd: DataDirectory) -> Result<
             size_of_zero_fill: h.SizeOfZeroFill,
             characteristics: unsafe { h.Anonymous.Characteristics },
         })
+    }
+}
+
+/// Parse the load configuration directory described by `dd`.
+///
+/// The structure is variable-length: the `size` field (u32 at offset 0) limits
+/// how many bytes are read, so fields beyond it parse as zero.
+pub(crate) fn parse_load_config_from_doc(
+    doc: &PeDocument,
+    dd: DataDirectory,
+) -> Result<LoadConfigDirectory> {
+    let declared = u32::from_le_bytes(doc.read(dd.rva, 4)?.try_into().unwrap()) as usize;
+    if ptr_size(doc.arch) == 8 {
+        let len = declared
+            .min(std::mem::size_of::<IMAGE_LOAD_CONFIG_DIRECTORY64>())
+            .max(4);
+        let bytes = doc.read(dd.rva, len)?;
+        Ok(read_lc64(bytes))
+    } else {
+        let len = declared
+            .min(std::mem::size_of::<IMAGE_LOAD_CONFIG_DIRECTORY32>())
+            .max(4);
+        let bytes = doc.read(dd.rva, len)?;
+        Ok(read_lc32(bytes))
+    }
+}
+
+fn read_lc64(b: &[u8]) -> LoadConfigDirectory {
+    use std::mem::offset_of;
+    type T = IMAGE_LOAD_CONFIG_DIRECTORY64;
+    let u16 = |off: usize| {
+        b.get(off..off + 2)
+            .map(|x| u16::from_le_bytes(x.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    let u32 = |off: usize| {
+        b.get(off..off + 4)
+            .map(|x| u32::from_le_bytes(x.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    let u64 = |off: usize| {
+        b.get(off..off + 8)
+            .map(|x| u64::from_le_bytes(x.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    LoadConfigDirectory {
+        size: u32(0),
+        time_date_stamp: u32(offset_of!(T, TimeDateStamp)),
+        major_version: u16(offset_of!(T, MajorVersion)),
+        minor_version: u16(offset_of!(T, MinorVersion)),
+        global_flags_clear: u32(offset_of!(T, GlobalFlagsClear)),
+        global_flags_set: u32(offset_of!(T, GlobalFlagsSet)),
+        security_cookie: u64(offset_of!(T, SecurityCookie)),
+        se_handler_table: u64(offset_of!(T, SEHandlerTable)),
+        se_handler_count: u64(offset_of!(T, SEHandlerCount)),
+        guard_cf_check_function_pointer: u64(offset_of!(T, GuardCFCheckFunctionPointer)),
+        guard_cf_dispatch_function_pointer: u64(offset_of!(T, GuardCFDispatchFunctionPointer)),
+        guard_cf_function_table: u64(offset_of!(T, GuardCFFunctionTable)),
+        guard_cf_function_count: u64(offset_of!(T, GuardCFFunctionCount)),
+        guard_flags: u32(offset_of!(T, GuardFlags)),
+        guard_address_taken_iat_entry_table: u64(offset_of!(T, GuardAddressTakenIatEntryTable)),
+        guard_address_taken_iat_entry_count: u64(offset_of!(T, GuardAddressTakenIatEntryCount)),
+        guard_long_jump_target_table: u64(offset_of!(T, GuardLongJumpTargetTable)),
+        guard_long_jump_target_count: u64(offset_of!(T, GuardLongJumpTargetCount)),
+        guard_eh_continuation_table: u64(offset_of!(T, GuardEHContinuationTable)),
+        guard_eh_continuation_count: u64(offset_of!(T, GuardEHContinuationCount)),
+        guard_xfg_check_function_pointer: u64(offset_of!(T, GuardXFGCheckFunctionPointer)),
+        guard_xfg_dispatch_function_pointer: u64(offset_of!(T, GuardXFGDispatchFunctionPointer)),
+        chpe_metadata_pointer: u64(offset_of!(T, CHPEMetadataPointer)),
+        hot_patch_table_offset: u32(offset_of!(T, HotPatchTableOffset)),
+    }
+}
+
+fn read_lc32(b: &[u8]) -> LoadConfigDirectory {
+    use std::mem::offset_of;
+    type T = IMAGE_LOAD_CONFIG_DIRECTORY32;
+    let u16 = |off: usize| {
+        b.get(off..off + 2)
+            .map(|x| u16::from_le_bytes(x.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    let u32 = |off: usize| {
+        b.get(off..off + 4)
+            .map(|x| u32::from_le_bytes(x.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    LoadConfigDirectory {
+        size: u32(0),
+        time_date_stamp: u32(offset_of!(T, TimeDateStamp)),
+        major_version: u16(offset_of!(T, MajorVersion)),
+        minor_version: u16(offset_of!(T, MinorVersion)),
+        global_flags_clear: u32(offset_of!(T, GlobalFlagsClear)),
+        global_flags_set: u32(offset_of!(T, GlobalFlagsSet)),
+        security_cookie: u32(offset_of!(T, SecurityCookie)) as u64,
+        se_handler_table: u32(offset_of!(T, SEHandlerTable)) as u64,
+        se_handler_count: u32(offset_of!(T, SEHandlerCount)) as u64,
+        guard_cf_check_function_pointer: u32(offset_of!(T, GuardCFCheckFunctionPointer)) as u64,
+        guard_cf_dispatch_function_pointer: u32(offset_of!(T, GuardCFDispatchFunctionPointer))
+            as u64,
+        guard_cf_function_table: u32(offset_of!(T, GuardCFFunctionTable)) as u64,
+        guard_cf_function_count: u32(offset_of!(T, GuardCFFunctionCount)) as u64,
+        guard_flags: u32(offset_of!(T, GuardFlags)),
+        guard_address_taken_iat_entry_table: u32(offset_of!(T, GuardAddressTakenIatEntryTable))
+            as u64,
+        guard_address_taken_iat_entry_count: u32(offset_of!(T, GuardAddressTakenIatEntryCount))
+            as u64,
+        guard_long_jump_target_table: u32(offset_of!(T, GuardLongJumpTargetTable)) as u64,
+        guard_long_jump_target_count: u32(offset_of!(T, GuardLongJumpTargetCount)) as u64,
+        guard_eh_continuation_table: u32(offset_of!(T, GuardEHContinuationTable)) as u64,
+        guard_eh_continuation_count: u32(offset_of!(T, GuardEHContinuationCount)) as u64,
+        guard_xfg_check_function_pointer: u32(offset_of!(T, GuardXFGCheckFunctionPointer)) as u64,
+        guard_xfg_dispatch_function_pointer: u32(offset_of!(T, GuardXFGDispatchFunctionPointer))
+            as u64,
+        chpe_metadata_pointer: u32(offset_of!(T, CHPEMetadataPointer)) as u64,
+        hot_patch_table_offset: u32(offset_of!(T, HotPatchTableOffset)),
     }
 }

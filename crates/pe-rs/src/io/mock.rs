@@ -12,6 +12,10 @@ use crate::api::{ImportResolver, ResolvedImport};
 use crate::domain::coff::IMAGE_FILE_EXECUTABLE_IMAGE;
 use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
 use crate::domain::dos::{DOS_MAGIC, DosHeader};
+use crate::domain::load_config::{
+    IMAGE_GUARD_CF_ENABLE_EXPORT_SUPPRESSION, IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT,
+    IMAGE_GUARD_CF_INSTRUMENTED, LoadConfigDirectory,
+};
 use crate::domain::optional::{
     IMAGE_SUBSYSTEM_WINDOWS_CUI, OptionalHeader, OptionalHeader64, PE32_PLUS_MAGIC,
 };
@@ -32,6 +36,7 @@ use crate::domain::{
     PeDocument, RawOffset, Rva,
 };
 use crate::error::Result;
+use crate::io::pe::directory_render::render_load_config;
 use crate::io::source::PeSource;
 
 /// Image base of the mock executable.
@@ -144,7 +149,7 @@ pub fn document() -> PeDocument {
     // TLS directory, so the directory parsers have real data to read. The raw
     // bytes here must match the rich forms stored on the document below.
     let manifest = b"<assembly manifestVersion=\"1.0\"></assembly>";
-    let mut rsrc = vec![0u8; 0x200];
+    let mut rsrc = vec![0u8; 0x300];
     // root directory: 1 ID entry
     rsrc[14..16].copy_from_slice(&1u16.to_le_bytes());
     // root entry: type 24 (manifest), subdirectory at 0x20
@@ -184,6 +189,40 @@ pub fn document() -> PeDocument {
     // callbacks / zero-fill / characteristics stay zero
     rsrc[0x100..0x104].copy_from_slice(&[0x2A, 0x00, 0x00, 0x00]); // TLS template data
     // TLS-index slot at 0x110 stays zero (the loader would write the index)
+
+    // Load configuration directory (CFG data) at 0x140: rendered from the rich
+    // form so the raw bytes match exactly.
+    let load_config = LoadConfigDirectory {
+        size: 0x140,
+        time_date_stamp: 0x5c0a_1234,
+        major_version: 0,
+        minor_version: 0,
+        global_flags_clear: 0,
+        global_flags_set: 0x8000_0000,
+        security_cookie: MOCK_IMAGE_BASE + 0x2000,
+        se_handler_table: 0,
+        se_handler_count: 0,
+        guard_cf_check_function_pointer: MOCK_IMAGE_BASE + 0x3000,
+        guard_cf_dispatch_function_pointer: MOCK_IMAGE_BASE + 0x3008,
+        guard_cf_function_table: MOCK_IMAGE_BASE + 0x3100,
+        guard_cf_function_count: 5,
+        guard_flags: IMAGE_GUARD_CF_INSTRUMENTED
+            | IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT
+            | IMAGE_GUARD_CF_ENABLE_EXPORT_SUPPRESSION,
+        guard_address_taken_iat_entry_table: MOCK_IMAGE_BASE + 0x3120,
+        guard_address_taken_iat_entry_count: 2,
+        guard_long_jump_target_table: MOCK_IMAGE_BASE + 0x3140,
+        guard_long_jump_target_count: 3,
+        guard_eh_continuation_table: MOCK_IMAGE_BASE + 0x3160,
+        guard_eh_continuation_count: 4,
+        guard_xfg_check_function_pointer: MOCK_IMAGE_BASE + 0x3180,
+        guard_xfg_dispatch_function_pointer: MOCK_IMAGE_BASE + 0x3188,
+        chpe_metadata_pointer: 0,
+        hot_patch_table_offset: 0x100,
+    };
+    let lc_bytes = render_load_config(&load_config, Arch::Bit64);
+    rsrc[0x140..0x140 + lc_bytes.len()].copy_from_slice(&lc_bytes);
+
     let rsrc = Section {
         header: SectionHeader {
             name: *b".rsrc\0\0\0",
@@ -216,6 +255,10 @@ pub fn document() -> PeDocument {
     dirs[DataDirectoryIndex::Tls.to_usize()] = DataDirectory {
         rva: Rva(MOCK_RSRC_RVA + 0xC0),
         size: 0x30,
+    };
+    dirs[DataDirectoryIndex::LoadConfig.to_usize()] = DataDirectory {
+        rva: Rva(MOCK_RSRC_RVA + 0x140),
+        size: 0x140,
     };
 
     PeDocument {
@@ -324,6 +367,7 @@ pub fn document() -> PeDocument {
             size_of_zero_fill: 0,
             characteristics: 0,
         }),
+        load_config: Some(load_config),
     }
 }
 

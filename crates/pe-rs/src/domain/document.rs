@@ -5,6 +5,7 @@ use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
 use crate::domain::dos::DosHeader;
 use crate::domain::export::ExportTable;
 use crate::domain::import::ImportDescriptor;
+use crate::domain::load_config::LoadConfigDirectory;
 use crate::domain::optional::OptionalHeader;
 use crate::domain::relocation::RelocationTable;
 use crate::domain::resource::ResourceDirectory;
@@ -36,6 +37,8 @@ pub struct PeDocument {
     pub relocations: Option<RelocationTable>,
     /// Parsed TLS directory.
     pub tls: Option<TlsDirectory>,
+    /// Parsed load configuration directory.
+    pub load_config: Option<LoadConfigDirectory>,
 }
 
 impl PeDocument {

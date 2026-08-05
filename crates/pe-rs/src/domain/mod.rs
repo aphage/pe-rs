@@ -9,6 +9,7 @@ pub mod dos;
 pub mod export;
 pub mod iat;
 pub mod import;
+pub mod load_config;
 pub mod optional;
 pub mod relocation;
 pub mod resource;
@@ -25,6 +26,7 @@ pub use iat::{
     IatEntry, IatFixOptions, IatFixReport, IatScan, RebuiltImportTable, ScanMethod, ScanOptions,
 };
 pub use import::{ImportDescriptor, ImportFunction};
+pub use load_config::LoadConfigDirectory;
 pub use optional::OptionalHeader;
 pub use relocation::{RelocationBlock, RelocationEntry, RelocationTable};
 pub use resource::{

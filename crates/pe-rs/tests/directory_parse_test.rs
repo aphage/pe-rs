@@ -4,6 +4,7 @@
 mod common;
 
 use pe_rs::api::{DirectoryEditor, PeViewer};
+use pe_rs::domain::load_config::IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT;
 use pe_rs::domain::relocation::IMAGE_REL_BASED_HIGHLOW;
 use pe_rs::domain::resource::RT_MANIFEST;
 use pe_rs::domain::{ResourceEntryData, ResourceName, Rva};
@@ -86,6 +87,31 @@ fn tls_directory_is_parsed() {
             MOCK_IMAGE_BASE + template_rva.get() as u64
         );
     });
+}
+
+#[test]
+fn load_config_is_parsed() {
+    common::both(|doc| {
+        let lc = doc.load_config().expect("mock has load config");
+        assert_eq!(lc.size, 0x140);
+        assert_eq!(lc.security_cookie, MOCK_IMAGE_BASE + 0x2000);
+        assert_eq!(lc.guard_cf_function_table, MOCK_IMAGE_BASE + 0x3100);
+        assert_eq!(lc.guard_cf_function_count, 5);
+        assert_ne!(lc.guard_flags & IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT, 0);
+        assert_eq!(
+            lc.guard_xfg_check_function_pointer,
+            MOCK_IMAGE_BASE + 0x3180
+        );
+        assert_eq!(lc.hot_patch_table_offset, 0x100);
+    });
+}
+
+#[test]
+fn load_config_roundtrips() {
+    let orig = common::doc_via_mock();
+    let bytes = serialize(&orig).unwrap();
+    let reparsed = parse(&bytes).unwrap();
+    assert_eq!(reparsed.load_config, orig.load_config);
 }
 
 #[test]

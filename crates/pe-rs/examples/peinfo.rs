@@ -124,6 +124,19 @@ fn print_document(doc: &pe_rs::domain::PeDocument) {
         ),
         None => println!("tls: none"),
     }
+
+    match doc.load_config() {
+        Some(lc) => println!(
+            "load_config: size={:#x} cookie={:#x} cf_flags={:#x} cf_table={:#x} ({} funcs) xfg_check={:#x}",
+            lc.size,
+            lc.security_cookie,
+            lc.guard_flags,
+            lc.guard_cf_function_table,
+            lc.guard_cf_function_count,
+            lc.guard_xfg_check_function_pointer,
+        ),
+        None => println!("load_config: none"),
+    }
 }
 
 fn count_resource_leaves(dir: &pe_rs::domain::ResourceDirectory) -> usize {

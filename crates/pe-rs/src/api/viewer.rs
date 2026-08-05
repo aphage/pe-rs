@@ -2,7 +2,8 @@
 
 use crate::domain::{
     Arch, CoffHeader, DataDirectory, DataDirectoryIndex, DosHeader, ExportTable, ImportDescriptor,
-    OptionalHeader, RawOffset, RelocationTable, ResourceDirectory, Rva, Section, TlsDirectory,
+    LoadConfigDirectory, OptionalHeader, RawOffset, RelocationTable, ResourceDirectory, Rva,
+    Section, TlsDirectory,
 };
 use crate::error::Result;
 
@@ -20,6 +21,7 @@ pub trait PeViewer {
     fn resources(&self) -> Option<&ResourceDirectory>;
     fn relocations(&self) -> Option<&RelocationTable>;
     fn tls(&self) -> Option<&TlsDirectory>;
+    fn load_config(&self) -> Option<&LoadConfigDirectory>;
     fn rva_to_raw(&self, rva: Rva) -> Result<RawOffset>;
     fn raw_to_rva(&self, raw: RawOffset) -> Result<Rva>;
     fn read(&self, rva: Rva, len: usize) -> Result<&[u8]>;
@@ -68,6 +70,10 @@ impl PeViewer for crate::domain::PeDocument {
 
     fn tls(&self) -> Option<&TlsDirectory> {
         self.tls.as_ref()
+    }
+
+    fn load_config(&self) -> Option<&LoadConfigDirectory> {
+        self.load_config.as_ref()
     }
 
     fn rva_to_raw(&self, rva: Rva) -> Result<RawOffset> {

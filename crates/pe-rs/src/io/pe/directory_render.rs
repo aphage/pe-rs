@@ -2,10 +2,14 @@
 //! the parser's directory parsers), used by the writer to persist edits made to
 //! the rich forms.
 
+use crate::domain::load_config::LoadConfigDirectory;
 use crate::domain::resource::{ResourceDirectory, ResourceEntryData, ResourceName};
 use crate::domain::types::Arch;
 use crate::domain::{RelocationTable, TlsDirectory};
 use crate::error::{PeError, Result};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    IMAGE_LOAD_CONFIG_DIRECTORY32, IMAGE_LOAD_CONFIG_DIRECTORY64,
+};
 use windows_sys::Win32::System::SystemServices::{
     IMAGE_BASE_RELOCATION, IMAGE_TLS_DIRECTORY32, IMAGE_TLS_DIRECTORY32_0, IMAGE_TLS_DIRECTORY64,
     IMAGE_TLS_DIRECTORY64_0,
@@ -67,6 +71,72 @@ pub fn render_relocations(table: &RelocationTable) -> Vec<u8> {
             SizeOfBlock: 0,
         },
     );
+    out
+}
+
+/// Render a load configuration directory. The `size` field is kept as-is; the
+/// remainder of the structure is zeroed.
+pub fn render_load_config(lc: &LoadConfigDirectory, arch: Arch) -> Vec<u8> {
+    let mut out = Vec::new();
+    if arch == Arch::Bit64 {
+        let h = IMAGE_LOAD_CONFIG_DIRECTORY64 {
+            Size: lc.size,
+            TimeDateStamp: lc.time_date_stamp,
+            MajorVersion: lc.major_version,
+            MinorVersion: lc.minor_version,
+            GlobalFlagsClear: lc.global_flags_clear,
+            GlobalFlagsSet: lc.global_flags_set,
+            SecurityCookie: lc.security_cookie,
+            SEHandlerTable: lc.se_handler_table,
+            SEHandlerCount: lc.se_handler_count,
+            GuardCFCheckFunctionPointer: lc.guard_cf_check_function_pointer,
+            GuardCFDispatchFunctionPointer: lc.guard_cf_dispatch_function_pointer,
+            GuardCFFunctionTable: lc.guard_cf_function_table,
+            GuardCFFunctionCount: lc.guard_cf_function_count,
+            GuardFlags: lc.guard_flags,
+            GuardAddressTakenIatEntryTable: lc.guard_address_taken_iat_entry_table,
+            GuardAddressTakenIatEntryCount: lc.guard_address_taken_iat_entry_count,
+            GuardLongJumpTargetTable: lc.guard_long_jump_target_table,
+            GuardLongJumpTargetCount: lc.guard_long_jump_target_count,
+            GuardEHContinuationTable: lc.guard_eh_continuation_table,
+            GuardEHContinuationCount: lc.guard_eh_continuation_count,
+            GuardXFGCheckFunctionPointer: lc.guard_xfg_check_function_pointer,
+            GuardXFGDispatchFunctionPointer: lc.guard_xfg_dispatch_function_pointer,
+            CHPEMetadataPointer: lc.chpe_metadata_pointer,
+            HotPatchTableOffset: lc.hot_patch_table_offset,
+            ..Default::default()
+        };
+        write_struct(&mut out, &h);
+    } else {
+        let h = IMAGE_LOAD_CONFIG_DIRECTORY32 {
+            Size: lc.size,
+            TimeDateStamp: lc.time_date_stamp,
+            MajorVersion: lc.major_version,
+            MinorVersion: lc.minor_version,
+            GlobalFlagsClear: lc.global_flags_clear,
+            GlobalFlagsSet: lc.global_flags_set,
+            SecurityCookie: lc.security_cookie as u32,
+            SEHandlerTable: lc.se_handler_table as u32,
+            SEHandlerCount: lc.se_handler_count as u32,
+            GuardCFCheckFunctionPointer: lc.guard_cf_check_function_pointer as u32,
+            GuardCFDispatchFunctionPointer: lc.guard_cf_dispatch_function_pointer as u32,
+            GuardCFFunctionTable: lc.guard_cf_function_table as u32,
+            GuardCFFunctionCount: lc.guard_cf_function_count as u32,
+            GuardFlags: lc.guard_flags,
+            GuardAddressTakenIatEntryTable: lc.guard_address_taken_iat_entry_table as u32,
+            GuardAddressTakenIatEntryCount: lc.guard_address_taken_iat_entry_count as u32,
+            GuardLongJumpTargetTable: lc.guard_long_jump_target_table as u32,
+            GuardLongJumpTargetCount: lc.guard_long_jump_target_count as u32,
+            GuardEHContinuationTable: lc.guard_eh_continuation_table as u32,
+            GuardEHContinuationCount: lc.guard_eh_continuation_count as u32,
+            GuardXFGCheckFunctionPointer: lc.guard_xfg_check_function_pointer as u32,
+            GuardXFGDispatchFunctionPointer: lc.guard_xfg_dispatch_function_pointer as u32,
+            CHPEMetadataPointer: lc.chpe_metadata_pointer as u32,
+            HotPatchTableOffset: lc.hot_patch_table_offset,
+            ..Default::default()
+        };
+        write_struct(&mut out, &h);
+    }
     out
 }
 
