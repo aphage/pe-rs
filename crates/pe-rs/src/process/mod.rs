@@ -5,6 +5,9 @@
 //! [`PeDocument`] from a running process's main module by reading its image
 //! from memory, and [`ProcessResolver`] resolves absolute addresses to
 //! `(module, function)` so the IAT scanner / fixer can operate on the dump.
+//! [`tracer`] installs inline API hooks to trace calls in a target process.
+
+pub mod tracer;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
