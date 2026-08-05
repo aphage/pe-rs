@@ -4,6 +4,8 @@
 //! - `MockSource` fabricates a deterministic in-memory `PeDocument` (no real parsing).
 //! - `ByteSource` / `FileSource` parse real PE bytes and serialize documents back.
 
+pub mod mock;
 pub mod source;
 
+pub use mock::{MockResolver, MockSource};
 pub use source::{ByteSource, FileSource, PeFile, PeSource};
