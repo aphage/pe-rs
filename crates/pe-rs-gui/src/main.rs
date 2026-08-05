@@ -180,21 +180,23 @@ impl PeEditorApp {
 }
 
 impl eframe::App for PeEditorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Drag-and-drop a PE file onto the window.
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(file) = dropped.first()
-            && let Some(path) = &file.path
-        {
-            self.path = path.display().to_string();
-            self.load_file();
+        let dropped: Vec<_> = ui.ctx().input(|i| i.raw.dropped_files.clone());
+        if let Some(file) = dropped.first() {
+            let path = file.path().to_string_lossy().into_owned();
+            if !path.is_empty() {
+                self.path = path;
+                self.load_file();
+            }
         }
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("PE:");
                 let resp = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
+                if resp.lost_focus() && enter {
                     self.load_file();
                 }
                 if ui.button("Load").clicked() {
@@ -226,7 +228,7 @@ impl eframe::App for PeEditorApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default_margins().show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (tab, name) in Tab::all() {
                     if ui.selectable_label(self.tab == tab, name).clicked() {
