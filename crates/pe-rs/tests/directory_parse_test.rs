@@ -58,12 +58,33 @@ fn relocations_are_parsed() {
 fn tls_directory_is_parsed() {
     common::both(|doc| {
         let tls = doc.tls().expect("mock has tls");
-        assert_eq!(tls.start_address_of_raw_data, MOCK_IMAGE_BASE + 0x1000);
-        assert_eq!(tls.end_address_of_raw_data, MOCK_IMAGE_BASE + 0x1100);
-        assert_eq!(tls.address_of_index, MOCK_IMAGE_BASE + 0x2000);
+        // start/end are VAs of the TLS template; index is a VA of a 4-byte slot.
+        assert_eq!(
+            tls.start_address_of_raw_data,
+            MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x100
+        );
+        assert_eq!(
+            tls.end_address_of_raw_data,
+            MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x104
+        );
+        assert_eq!(
+            tls.address_of_index,
+            MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x110
+        );
         assert_eq!(tls.address_of_callbacks, 0);
         assert_eq!(tls.size_of_zero_fill, 0);
         assert_eq!(tls.characteristics, 0);
+
+        // The template bytes are real: start -> image RVA 0x3100 holds 4 bytes.
+        let template_rva = Rva(MOCK_RSRC_RVA + 0x100);
+        assert_eq!(
+            doc.read(template_rva, 4).unwrap(),
+            &[0x2A, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            tls.start_address_of_raw_data,
+            MOCK_IMAGE_BASE + template_rva.get() as u64
+        );
     });
 }
 

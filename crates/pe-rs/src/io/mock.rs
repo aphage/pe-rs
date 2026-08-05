@@ -144,7 +144,7 @@ pub fn document() -> PeDocument {
     // TLS directory, so the directory parsers have real data to read. The raw
     // bytes here must match the rich forms stored on the document below.
     let manifest = b"<assembly manifestVersion=\"1.0\"></assembly>";
-    let mut rsrc = vec![0u8; 0x100];
+    let mut rsrc = vec![0u8; 0x200];
     // root directory: 1 ID entry
     rsrc[14..16].copy_from_slice(&1u16.to_le_bytes());
     // root entry: type 24 (manifest), subdirectory at 0x20
@@ -170,10 +170,20 @@ pub fn document() -> PeDocument {
     rsrc[0xA8..0xAA]
         .copy_from_slice(&(((IMAGE_REL_BASED_HIGHLOW as u16) << 12) | 0x10).to_le_bytes());
     // terminator block at 0xAC (zeros); TLS directory at 0xC0
-    rsrc[0xC0..0xC8].copy_from_slice(&(MOCK_IMAGE_BASE + 0x1000).to_le_bytes());
-    rsrc[0xC8..0xD0].copy_from_slice(&(MOCK_IMAGE_BASE + 0x1100).to_le_bytes());
-    rsrc[0xD0..0xD8].copy_from_slice(&(MOCK_IMAGE_BASE + 0x2000).to_le_bytes());
+    //
+    // StartAddressOfRawData / EndAddressOfRawData are the *VAs* of the TLS
+    // template — the initialized data block the loader copies per thread — so
+    // they must point at real bytes in the image. We place a 4-byte template at
+    // 0x100 and a zeroed TLS-index slot at 0x110, and reference those.
+    rsrc[0xC0..0xC8]
+        .copy_from_slice(&(MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x100).to_le_bytes());
+    rsrc[0xC8..0xD0]
+        .copy_from_slice(&(MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x104).to_le_bytes());
+    rsrc[0xD0..0xD8]
+        .copy_from_slice(&(MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x110).to_le_bytes());
     // callbacks / zero-fill / characteristics stay zero
+    rsrc[0x100..0x104].copy_from_slice(&[0x2A, 0x00, 0x00, 0x00]); // TLS template data
+    // TLS-index slot at 0x110 stays zero (the loader would write the index)
     let rsrc = Section {
         header: SectionHeader {
             name: *b".rsrc\0\0\0",
@@ -307,9 +317,9 @@ pub fn document() -> PeDocument {
             }],
         }),
         tls: Some(TlsDirectory {
-            start_address_of_raw_data: MOCK_IMAGE_BASE + 0x1000,
-            end_address_of_raw_data: MOCK_IMAGE_BASE + 0x1100,
-            address_of_index: MOCK_IMAGE_BASE + 0x2000,
+            start_address_of_raw_data: MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x100,
+            end_address_of_raw_data: MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x104,
+            address_of_index: MOCK_IMAGE_BASE + MOCK_RSRC_RVA as u64 + 0x110,
             address_of_callbacks: 0,
             size_of_zero_fill: 0,
             characteristics: 0,
