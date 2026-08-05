@@ -44,20 +44,23 @@ impl PeDocument {
         let psize = ptr_size(self.arch);
         let (start, len) = self.scan_window(options)?;
 
+        // Zero slots are per-module NULL separators: a run continues across
+        // them as long as the next resolvable slot is within `max_null_gap`.
+        // Non-zero but unresolvable slots end the run.
         let mut current: Option<Run> = None;
         let mut best: Option<Run> = None;
+        let mut gap = 0usize;
 
         for off in (0..len).step_by(psize) {
             let Some(slot_rva) = start.checked_add(off as u32) else {
                 break;
             };
-            let slot_val = self.read(slot_rva, psize).ok().and_then(|b| {
-                let v = read_thunk(b, psize);
-                resolver.resolve(v).map(|_| v)
-            });
-
-            match slot_val {
-                Some(v) => {
+            let slot = self
+                .read(slot_rva, psize)
+                .ok()
+                .map(|b| read_thunk(b, psize));
+            match slot {
+                Some(v) if resolver.resolve(v).is_some() => {
                     let run = current.get_or_insert_with(|| Run {
                         base: slot_rva,
                         entries: Vec::new(),
@@ -66,11 +69,21 @@ impl PeDocument {
                         rva: slot_rva,
                         value: v,
                     });
+                    gap = 0;
                 }
-                None => {
+                Some(0) => {
+                    gap += 1;
+                    if gap > options.max_null_gap
+                        && let Some(run) = current.take()
+                    {
+                        consider(run, options.min_entries, &mut best);
+                    }
+                }
+                _ => {
                     if let Some(run) = current.take() {
                         consider(run, options.min_entries, &mut best);
                     }
+                    gap = 0;
                 }
             }
         }
@@ -158,7 +171,10 @@ impl PeDocument {
                     };
                     if let Ok(bytes) = self.read(target, psize) {
                         let v = read_thunk(bytes, psize);
-                        if resolver.resolve(v).is_some() {
+                        // In signature mode (`validate_slots = false`) the slot
+                        // content is not required to resolve — the code
+                        // reference itself marks the slot as IAT-like.
+                        if !options.validate_slots || resolver.resolve(v).is_some() {
                             slots.insert(target, v);
                         }
                     }
@@ -172,17 +188,22 @@ impl PeDocument {
             ));
         }
 
-        // 2. Sort the unique slots and group consecutive ones (differ by psize).
+        // 2. Sort the unique slots and group runs: a slot continues a run when
+        //    it is within `max_null_gap + 1` pointer widths of the previous
+        //    referenced slot, so split IAT chunks still merge.
         let mut ordered: Vec<Rva> = slots.keys().copied().collect();
         ordered.sort_unstable();
+        let max_span = psize as u32 * (options.max_null_gap as u32 + 1);
         let mut current: Option<Run> = None;
         let mut best: Option<Run> = None;
         for &rva in &ordered {
             let is_next = current.as_ref().is_none_or(|r| {
-                rva.get()
-                    == r.base
-                        .get()
-                        .saturating_add((r.entries.len() * psize) as u32)
+                let last = r
+                    .entries
+                    .last()
+                    .map(|e| e.rva.get())
+                    .unwrap_or(r.base.get());
+                rva.get() > last && rva.get() - last <= max_span
             });
             if is_next {
                 let run = current.get_or_insert_with(|| Run {

@@ -39,6 +39,14 @@ pub struct ScanOptions {
     pub method: ScanMethod,
     /// Minimum number of consecutive valid entries a candidate must have.
     pub min_entries: usize,
+    /// Maximum consecutive zero slots allowed inside a run (the per-module
+    /// NULL separators of a real IAT). Larger gaps end the run.
+    pub max_null_gap: usize,
+    /// Opcode scan: require each referenced slot's content to resolve through
+    /// the [`ImportResolver`](crate::api::ImportResolver). Disable for
+    /// protected dumps (erased / split IAT, e.g. VMProtect) where the slot
+    /// content does not resolve — the code references alone locate the IAT.
+    pub validate_slots: bool,
 }
 
 impl Default for ScanOptions {
@@ -47,6 +55,8 @@ impl Default for ScanOptions {
             region: None,
             method: ScanMethod::Resolver,
             min_entries: 4,
+            max_null_gap: 4,
+            validate_slots: true,
         }
     }
 }
