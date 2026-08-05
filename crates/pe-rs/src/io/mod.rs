@@ -5,6 +5,7 @@
 //! - `ByteSource` / `FileSource` parse real PE bytes and serialize documents back.
 
 pub mod mock;
+pub mod pe;
 pub mod source;
 
 pub use mock::{

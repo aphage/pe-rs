@@ -1,10 +1,11 @@
 //! The persistence port of the library: getting a [`PeDocument`] from bytes /
 //! disk and writing it back. Mock and real differ only here.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use crate::domain::PeDocument;
-use crate::error::{PeError, Result};
+use crate::error::Result;
 
 /// Loads and saves a PE document. The only adapter point that differs between
 /// the mock and the real implementation.
@@ -16,28 +17,32 @@ pub trait PeSource {
 /// A PE held entirely in memory.
 pub struct ByteSource {
     bytes: Vec<u8>,
+    saved: RefCell<Vec<u8>>,
 }
 
 impl ByteSource {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self { bytes, saved: RefCell::new(Vec::new()) }
     }
 
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The bytes produced by the last `save()` (empty if never saved).
+    pub fn saved_bytes(&self) -> Vec<u8> {
+        self.saved.borrow().clone()
+    }
 }
 
 impl PeSource for ByteSource {
     fn load(&self) -> Result<PeDocument> {
-        // Replaced in Phase 4 with the real parser:
-        // crate::io::pe::parse(&self.bytes)
-        let _ = &self.bytes;
-        Err(PeError::NotImplemented("ByteSource::load"))
+        crate::io::pe::parse(&self.bytes)
     }
 
-    fn save(&self, _doc: &PeDocument) -> Result<()> {
-        Err(PeError::NotImplemented("ByteSource::save"))
+    fn save(&self, doc: &PeDocument) -> Result<()> {
+        *self.saved.borrow_mut() = crate::io::pe::serialize(doc)?;
+        Ok(())
     }
 }
 
@@ -59,14 +64,13 @@ impl FileSource {
 impl PeSource for FileSource {
     fn load(&self) -> Result<PeDocument> {
         let bytes = std::fs::read(&self.path)?;
-        // Replaced in Phase 4 with the real parser:
-        // crate::io::pe::parse(&bytes)
-        let _ = &bytes;
-        Err(PeError::NotImplemented("FileSource::load"))
+        crate::io::pe::parse(&bytes)
     }
 
-    fn save(&self, _doc: &PeDocument) -> Result<()> {
-        Err(PeError::NotImplemented("FileSource::save"))
+    fn save(&self, doc: &PeDocument) -> Result<()> {
+        let bytes = crate::io::pe::serialize(doc)?;
+        std::fs::write(&self.path, bytes)?;
+        Ok(())
     }
 }
 
