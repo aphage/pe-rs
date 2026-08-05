@@ -4,7 +4,9 @@
 mod common;
 
 use pe_rs::api::{PeEditor, PeViewer};
-use pe_rs::domain::section::{IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE};
+use pe_rs::domain::section::{
+    IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
+};
 use pe_rs::domain::{DataDirectoryIndex, Rva};
 use pe_rs::io::MOCK_TEXT_RVA;
 
@@ -53,7 +55,12 @@ fn alloc_appends_aligned_section() {
         let before_end = doc
             .sections()
             .iter()
-            .map(|s| s.header.virtual_address.get().saturating_add(s.data.len() as u32))
+            .map(|s| {
+                s.header
+                    .virtual_address
+                    .get()
+                    .saturating_add(s.data.len() as u32)
+            })
             .max()
             .unwrap();
         let rva = doc.alloc(0x40, align).unwrap();

@@ -7,10 +7,9 @@ use crate::domain::export::ExportTable;
 use crate::domain::import::ImportDescriptor;
 use crate::domain::optional::OptionalHeader;
 use crate::domain::section::{
-    Section, SectionHeader, IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ,
-    IMAGE_SCN_MEM_WRITE,
+    IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, Section, SectionHeader,
 };
-use crate::domain::types::{align_up, Arch, RawOffset, Rva};
+use crate::domain::types::{Arch, RawOffset, Rva, align_up};
 use crate::error::{PeError, Result};
 
 /// A PE file's contents, independent of where the bytes came from (a real file
@@ -47,24 +46,26 @@ impl PeDocument {
 
     /// Read `len` bytes at `rva` from the in-memory image.
     pub fn read(&self, rva: Rva, len: usize) -> Result<&[u8]> {
-        let (i, off) = self
-            .section_containing_rva(rva)
-            .ok_or_else(|| PeError::InvalidArgument(format!("read: RVA {:#x} not mapped", rva.get())))?;
+        let (i, off) = self.section_containing_rva(rva).ok_or_else(|| {
+            PeError::InvalidArgument(format!("read: RVA {:#x} not mapped", rva.get()))
+        })?;
         let start = off as usize;
         let end = start
             .checked_add(len)
             .ok_or_else(|| PeError::InvalidArgument("read: length overflow".into()))?;
-        self.sections[i]
-            .data
-            .get(start..end)
-            .ok_or_else(|| PeError::InvalidArgument(format!("read: RVA {:#x} len {len} exceeds section", rva.get())))
+        self.sections[i].data.get(start..end).ok_or_else(|| {
+            PeError::InvalidArgument(format!(
+                "read: RVA {:#x} len {len} exceeds section",
+                rva.get()
+            ))
+        })
     }
 
     /// Overwrite `bytes` at `rva` in the in-memory image.
     pub fn write(&mut self, rva: Rva, bytes: &[u8]) -> Result<()> {
-        let (i, off) = self
-            .section_containing_rva(rva)
-            .ok_or_else(|| PeError::InvalidArgument(format!("write: RVA {:#x} not mapped", rva.get())))?;
+        let (i, off) = self.section_containing_rva(rva).ok_or_else(|| {
+            PeError::InvalidArgument(format!("write: RVA {:#x} not mapped", rva.get()))
+        })?;
         let start = off as usize;
         let end = start
             .checked_add(bytes.len())
@@ -88,7 +89,12 @@ impl PeDocument {
         let end = self
             .sections
             .iter()
-            .map(|s| s.header.virtual_address.get().saturating_add(s.data.len() as u32))
+            .map(|s| {
+                s.header
+                    .virtual_address
+                    .get()
+                    .saturating_add(s.data.len() as u32)
+            })
             .max()
             .unwrap_or(0);
         let va = align_up(end, align);
@@ -99,7 +105,9 @@ impl PeDocument {
                 virtual_address: Rva(va),
                 size_of_raw_data: 0,
                 pointer_to_raw_data: RawOffset::NULL,
-                characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE,
+                characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
+                    | IMAGE_SCN_MEM_READ
+                    | IMAGE_SCN_MEM_WRITE,
             },
             data: vec![0u8; size],
         });
@@ -116,7 +124,10 @@ impl PeDocument {
                 return Ok(RawOffset(s.header.pointer_to_raw_data.get() + (r - va)));
             }
         }
-        Err(PeError::InvalidArgument(format!("rva_to_raw: RVA {:#x} not mapped", rva.get())))
+        Err(PeError::InvalidArgument(format!(
+            "rva_to_raw: RVA {:#x} not mapped",
+            rva.get()
+        )))
     }
 
     /// Translate a raw file offset to an RVA, or error when not mapped.
@@ -129,13 +140,16 @@ impl PeDocument {
                 return Ok(Rva(s.header.virtual_address.get() + (o - base)));
             }
         }
-        Err(PeError::InvalidArgument(format!("raw_to_rva: offset {:#x} not mapped", raw.get())))
+        Err(PeError::InvalidArgument(format!(
+            "raw_to_rva: offset {:#x} not mapped",
+            raw.get()
+        )))
     }
 
     /// Direct access to one data directory entry.
     pub fn data_directory(&self, index: DataDirectoryIndex) -> Result<&DataDirectory> {
-        self.data_directories
-            .get(index.to_usize())
-            .ok_or_else(|| PeError::InvalidArgument(format!("data_directory: no entry for {:?}", index)))
+        self.data_directories.get(index.to_usize()).ok_or_else(|| {
+            PeError::InvalidArgument(format!("data_directory: no entry for {:?}", index))
+        })
     }
 }

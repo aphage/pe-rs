@@ -3,7 +3,7 @@
 
 mod common;
 
-use pe_rs::domain::{Rva, RawOffset};
+use pe_rs::domain::{RawOffset, Rva};
 use pe_rs::feature::VaConverter;
 use pe_rs::io::{MOCK_IMAGE_BASE, MOCK_TEXT_RVA};
 
@@ -23,8 +23,14 @@ fn section_raw_roundtrips() {
         let c = VaConverter::from_document(doc);
         let raw = c.rva_to_raw(Rva(MOCK_TEXT_RVA)).unwrap();
         assert_eq!(c.raw_to_rva(raw), Some(Rva(MOCK_TEXT_RVA)));
-        assert_eq!(c.raw_to_va(raw), Some(MOCK_IMAGE_BASE + MOCK_TEXT_RVA as u64));
-        assert_eq!(c.va_to_raw(MOCK_IMAGE_BASE + MOCK_TEXT_RVA as u64), Some(raw));
+        assert_eq!(
+            c.raw_to_va(raw),
+            Some(MOCK_IMAGE_BASE + MOCK_TEXT_RVA as u64)
+        );
+        assert_eq!(
+            c.va_to_raw(MOCK_IMAGE_BASE + MOCK_TEXT_RVA as u64),
+            Some(raw)
+        );
     });
 }
 

@@ -3,9 +3,7 @@
 use crate::api::importer::ImportTableEditor;
 use crate::api::resolver::ImportResolver;
 use crate::domain::types::ptr_size;
-use crate::domain::{
-    IatEntry, IatFixOptions, IatFixReport, IatScan, ImportDescriptor, PeDocument,
-};
+use crate::domain::{IatEntry, IatFixOptions, IatFixReport, IatScan, ImportDescriptor, PeDocument};
 use crate::error::{PeError, Result};
 
 /// Rebuilds a PE's import table from the addresses found in its IAT.
@@ -99,7 +97,9 @@ impl IatFixer for PeDocument {
         options: &IatFixOptions,
     ) -> Result<IatFixReport> {
         if entries.is_empty() {
-            return Err(PeError::InvalidArgument("add_iat_array: empty entries".into()));
+            return Err(PeError::InvalidArgument(
+                "add_iat_array: empty entries".into(),
+            ));
         }
         let scan = IatScan {
             base_rva: entries[0].rva,

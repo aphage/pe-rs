@@ -6,16 +6,15 @@
 //! This means `parse(serialize(doc))` preserves the document's *content*
 //! (headers, section data, imports, exports) while the file layout is canonical.
 
+use crate::domain::PeDocument;
 use crate::domain::coff::CoffHeader;
 use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
 use crate::domain::dos::DosHeader;
 use crate::domain::optional::OptionalHeader;
 use crate::domain::section::{
-    Section, SectionHeader, IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ,
-    IMAGE_SCN_MEM_WRITE,
+    IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, Section, SectionHeader,
 };
-use crate::domain::types::{align_up, RawOffset, Rva};
-use crate::domain::PeDocument;
+use crate::domain::types::{RawOffset, Rva, align_up};
 use crate::error::Result;
 
 use super::export_render::render_export_table;
@@ -38,7 +37,12 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
     let image_end = |sections: &[Section]| {
         sections
             .iter()
-            .map(|s| s.header.virtual_address.get().saturating_add(s.data.len() as u32))
+            .map(|s| {
+                s.header
+                    .virtual_address
+                    .get()
+                    .saturating_add(s.data.len() as u32)
+            })
             .max()
             .unwrap_or(0)
     };
@@ -62,10 +66,14 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
                 header: section_header_for(*b".peimp\0\0", Rva(base), rendered.blob.len()),
                 data: rendered.blob,
             });
-            dirs[DataDirectoryIndex::Import.to_usize()] =
-                DataDirectory { rva: Rva(rendered.dir_rva), size: rendered.size };
-            dirs[DataDirectoryIndex::Iat.to_usize()] =
-                DataDirectory { rva: Rva(rendered.iat_rva), size: rendered.iat_size };
+            dirs[DataDirectoryIndex::Import.to_usize()] = DataDirectory {
+                rva: Rva(rendered.dir_rva),
+                size: rendered.size,
+            };
+            dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory {
+                rva: Rva(rendered.iat_rva),
+                size: rendered.iat_size,
+            };
         }
     }
 
@@ -86,8 +94,10 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
                 header: section_header_for(*b".peexp\0\0", Rva(base), rendered.blob.len()),
                 data: rendered.blob,
             });
-            dirs[DataDirectoryIndex::Export.to_usize()] =
-                DataDirectory { rva: Rva(rendered.rva), size: rendered.size };
+            dirs[DataDirectoryIndex::Export.to_usize()] = DataDirectory {
+                rva: Rva(rendered.rva),
+                size: rendered.size,
+            };
         }
     }
 
@@ -96,8 +106,7 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
         OptionalHeader::Bit64(_) => 112,
     };
     let optional_full_len = optional_struct_len + DataDirectoryIndex::COUNT * 8;
-    let head_end =
-        64 + doc.dos.stub.len() + 4 + 20 + optional_full_len + 40 * sections.len();
+    let head_end = 64 + doc.dos.stub.len() + 4 + 20 + optional_full_len + 40 * sections.len();
     let size_of_headers = align_up(head_end as u32, file_alignment);
     let size_of_image = align_up(image_end(&sections), section_alignment);
 
@@ -119,7 +128,11 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
     out.extend_from_slice(&optional);
     for (i, s) in sections.iter().enumerate() {
         let (ptr, size) = raw_offsets[i];
-        out.extend_from_slice(&encode_section_header(&s.header, size as u32, RawOffset(ptr as u32)));
+        out.extend_from_slice(&encode_section_header(
+            &s.header,
+            size as u32,
+            RawOffset(ptr as u32),
+        ));
     }
     out.resize(size_of_headers as usize, 0);
 
@@ -174,7 +187,11 @@ fn encode_dos(dos: &DosHeader) -> Vec<u8> {
     b
 }
 
-fn encode_coff(coff: &CoffHeader, number_of_sections: u16, size_of_optional_header: u16) -> Vec<u8> {
+fn encode_coff(
+    coff: &CoffHeader,
+    number_of_sections: u16,
+    size_of_optional_header: u16,
+) -> Vec<u8> {
     let mut b = Vec::with_capacity(20);
     b.extend_from_slice(&coff.machine.to_u16().to_le_bytes());
     b.extend_from_slice(&number_of_sections.to_le_bytes());

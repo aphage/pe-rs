@@ -6,7 +6,9 @@
 //! `merge_sections` combines a contiguous run of sections into one.
 
 use crate::domain::types::align_up;
-use crate::domain::{DataDirectoryIndex, OptionalHeader, PeDocument, RawOffset, Rva, Section, SectionHeader};
+use crate::domain::{
+    DataDirectoryIndex, OptionalHeader, PeDocument, RawOffset, Rva, Section, SectionHeader,
+};
 use crate::error::{PeError, Result};
 
 /// Re-align and re-lay-out the section table so the file is internally
@@ -41,7 +43,8 @@ pub fn rebuild_section_table(doc: &mut PeDocument) -> Result<()> {
             .ok_or_else(|| PeError::InvalidArgument("section table size overflow".into()))?;
         image_end = image_end.max(va.saturating_add(data_len));
     }
-    doc.optional.set_size_of_image(align_up(image_end, section_alignment));
+    doc.optional
+        .set_size_of_image(align_up(image_end, section_alignment));
     Ok(())
 }
 

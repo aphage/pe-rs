@@ -43,7 +43,11 @@ pub struct ScanOptions {
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { region: None, method: ScanMethod::Resolver, min_entries: 4 }
+        Self {
+            region: None,
+            method: ScanMethod::Resolver,
+            min_entries: 4,
+        }
     }
 }
 

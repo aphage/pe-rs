@@ -9,7 +9,10 @@ pub enum ImportFunction {
 
 impl ImportFunction {
     pub fn by_name(name: impl Into<String>) -> Self {
-        Self::Name { hint: 0, name: name.into() }
+        Self::Name {
+            hint: 0,
+            name: name.into(),
+        }
     }
 
     pub fn by_ordinal(ordinal: u16) -> Self {
@@ -48,6 +51,9 @@ pub struct ImportDescriptor {
 
 impl ImportDescriptor {
     pub fn new(name: impl Into<String>, functions: Vec<ImportFunction>) -> Self {
-        Self { name: name.into(), functions }
+        Self {
+            name: name.into(),
+            functions,
+        }
     }
 }

@@ -55,9 +55,12 @@ pub fn render_export_table(exports: &ExportTable, base_rva: Rva) -> Result<Rende
     }
 
     let mut blob = vec![0u8; str_off];
-    let rva = |off: usize| base_rva.get().checked_add(off as u32).ok_or_else(|| {
-        PeError::InvalidArgument("export table too large".into())
-    });
+    let rva = |off: usize| {
+        base_rva
+            .get()
+            .checked_add(off as u32)
+            .ok_or_else(|| PeError::InvalidArgument("export table too large".into()))
+    };
 
     // Export directory.
     put_u32(&mut blob, 0, 0); // characteristics
@@ -76,7 +79,10 @@ pub fn render_export_table(exports: &ExportTable, base_rva: Rva) -> Result<Rende
 
     for (slot, s) in syms.iter().enumerate() {
         // Function address: either a forwarder string RVA or the symbol's RVA.
-        let fwd = fwd_off.iter().find(|(o, _)| *o == s.ordinal).map(|(_, off)| *off);
+        let fwd = fwd_off
+            .iter()
+            .find(|(o, _)| *o == s.ordinal)
+            .map(|(_, off)| *off);
         let addr = match fwd {
             Some(off) => rva(off)?,
             None => s.rva.get(),
@@ -84,7 +90,10 @@ pub fn render_export_table(exports: &ExportTable, base_rva: Rva) -> Result<Rende
         put_u32(&mut blob, funcs_off + slot * 4, addr);
 
         if let Some(name) = &s.name {
-            let ni = named.iter().position(|x| x.ordinal == s.ordinal).expect("named");
+            let ni = named
+                .iter()
+                .position(|x| x.ordinal == s.ordinal)
+                .expect("named");
             put_u32(&mut blob, names_off + ni * 4, rva(name_offs[ni])?);
             put_u16(&mut blob, ordinals_off + ni * 2, slot as u16);
             let ns = name.as_bytes();

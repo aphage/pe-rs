@@ -11,11 +11,13 @@ use std::collections::HashMap;
 use crate::api::{ImportResolver, ResolvedImport};
 use crate::domain::coff::IMAGE_FILE_EXECUTABLE_IMAGE;
 use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
-use crate::domain::dos::{DosHeader, DOS_MAGIC};
-use crate::domain::optional::{OptionalHeader, OptionalHeader64, PE32_PLUS_MAGIC, IMAGE_SUBSYSTEM_WINDOWS_CUI};
+use crate::domain::dos::{DOS_MAGIC, DosHeader};
+use crate::domain::optional::{
+    IMAGE_SUBSYSTEM_WINDOWS_CUI, OptionalHeader, OptionalHeader64, PE32_PLUS_MAGIC,
+};
 use crate::domain::section::{
-    Section, SectionHeader, IMAGE_SCN_CNT_CODE, IMAGE_SCN_CNT_INITIALIZED_DATA,
-    IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
+    IMAGE_SCN_CNT_CODE, IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
+    IMAGE_SCN_MEM_WRITE, Section, SectionHeader,
 };
 use crate::domain::{
     Arch, CoffHeader, ExportSymbol, ExportTable, ImportDescriptor, ImportFunction, Machine,
@@ -52,10 +54,7 @@ pub fn mock_imports() -> Vec<ImportDescriptor> {
                 ImportFunction::by_name("ExitProcess"),
             ],
         ),
-        ImportDescriptor::new(
-            "user32.dll",
-            vec![ImportFunction::by_name("MessageBoxA")],
-        ),
+        ImportDescriptor::new("user32.dll", vec![ImportFunction::by_name("MessageBoxA")]),
     ]
 }
 
@@ -106,20 +105,30 @@ pub fn document() -> PeDocument {
             virtual_address: Rva(MOCK_IDATA_RVA),
             size_of_raw_data: 0x200,
             pointer_to_raw_data: RawOffset(0x400),
-            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE,
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
+                | IMAGE_SCN_MEM_READ
+                | IMAGE_SCN_MEM_WRITE,
         },
         data: idata,
     };
 
     let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
-    dirs[DataDirectoryIndex::Import.to_usize()] =
-        DataDirectory { rva: Rva(MOCK_IDATA_RVA), size: 0x80 };
-    dirs[DataDirectoryIndex::Iat.to_usize()] =
-        DataDirectory { rva: Rva(MOCK_IAT_RVA), size: iat_bytes as u32 };
+    dirs[DataDirectoryIndex::Import.to_usize()] = DataDirectory {
+        rva: Rva(MOCK_IDATA_RVA),
+        size: 0x80,
+    };
+    dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory {
+        rva: Rva(MOCK_IAT_RVA),
+        size: iat_bytes as u32,
+    };
 
     PeDocument {
         arch: Arch::Bit64,
-        dos: DosHeader { e_magic: DOS_MAGIC, e_lfanew: 0x40, ..DosHeader::default() },
+        dos: DosHeader {
+            e_magic: DOS_MAGIC,
+            e_lfanew: 0x40,
+            ..DosHeader::default()
+        },
         coff: CoffHeader {
             machine: Machine::Amd64,
             number_of_sections: 2,
@@ -167,8 +176,18 @@ pub fn document() -> PeDocument {
             base: 1,
             number_of_functions: 2,
             symbols: vec![
-                ExportSymbol { name: Some("Start".to_string()), ordinal: 1, rva: Rva(MOCK_TEXT_RVA), forwarder: None },
-                ExportSymbol { name: Some("DumpMe".to_string()), ordinal: 2, rva: Rva(MOCK_TEXT_RVA + 0x10), forwarder: None },
+                ExportSymbol {
+                    name: Some("Start".to_string()),
+                    ordinal: 1,
+                    rva: Rva(MOCK_TEXT_RVA),
+                    forwarder: None,
+                },
+                ExportSymbol {
+                    name: Some("DumpMe".to_string()),
+                    ordinal: 2,
+                    rva: Rva(MOCK_TEXT_RVA + 0x10),
+                    forwarder: None,
+                },
             ],
         }),
         imports,
@@ -224,7 +243,10 @@ impl MockResolver {
             for f in &desc.functions {
                 map.insert(
                     addr,
-                    ResolvedImport { module: desc.name.clone(), function: f.clone() },
+                    ResolvedImport {
+                        module: desc.name.clone(),
+                        function: f.clone(),
+                    },
                 );
                 addr += 0x100;
             }

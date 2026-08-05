@@ -5,7 +5,7 @@ mod common;
 
 use pe_rs::api::IatScanner;
 use pe_rs::domain::{Rva, ScanMethod, ScanOptions};
-use pe_rs::io::{MockResolver, MOCK_APIS_BASE, MOCK_IAT_RVA};
+use pe_rs::io::{MOCK_APIS_BASE, MOCK_IAT_RVA, MockResolver};
 
 #[test]
 fn scan_finds_mock_iat_over_whole_image() {
@@ -65,7 +65,10 @@ fn scan_ignores_unresolvable_region() {
 fn opcode_pattern_method_is_not_yet_implemented() {
     let resolver = MockResolver::new();
     common::both(|doc| {
-        let opts = ScanOptions { method: ScanMethod::OpcodePattern, ..Default::default() };
+        let opts = ScanOptions {
+            method: ScanMethod::OpcodePattern,
+            ..Default::default()
+        };
         assert!(doc.scan(&resolver, &opts).is_err());
     });
 }

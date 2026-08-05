@@ -1,16 +1,16 @@
 //! Real PE parser: bytes → [`PeDocument`].
 
+use crate::domain::PeDocument;
 use crate::domain::coff::CoffHeader;
 use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
-use crate::domain::dos::{DosHeader, DOS_MAGIC};
+use crate::domain::dos::{DOS_MAGIC, DosHeader};
 use crate::domain::export::{ExportSymbol, ExportTable};
 use crate::domain::import::{ImportDescriptor, ImportFunction};
 use crate::domain::optional::{
     OptionalHeader, OptionalHeader32, OptionalHeader64, PE32_MAGIC, PE32_PLUS_MAGIC,
 };
 use crate::domain::section::{Section, SectionHeader};
-use crate::domain::types::{ptr_size, Machine, RawOffset, Rva};
-use crate::domain::PeDocument;
+use crate::domain::types::{Machine, RawOffset, Rva, ptr_size};
 use crate::error::{PeError, Result};
 
 const PE_SIGNATURE: [u8; 4] = *b"PE\0\0";
@@ -20,7 +20,9 @@ const MAX_SECTION_SIZE: usize = 0x1000_0000;
 
 fn take(bytes: &[u8], off: usize, n: usize) -> Result<&[u8]> {
     bytes.get(off..off + n).ok_or_else(|| {
-        PeError::Malformed(format!("truncated at file offset {off:#x} (need {n} bytes)"))
+        PeError::Malformed(format!(
+            "truncated at file offset {off:#x} (need {n} bytes)"
+        ))
     })
 }
 
@@ -44,7 +46,9 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     }
     let pe_off = dos.e_lfanew as usize;
     if take(bytes, pe_off, 4)? != PE_SIGNATURE {
-        return Err(PeError::Malformed(format!("missing PE signature at {pe_off:#x}")));
+        return Err(PeError::Malformed(format!(
+            "missing PE signature at {pe_off:#x}"
+        )));
     }
 
     let coff = parse_coff(bytes, pe_off + 4)?;
@@ -52,7 +56,8 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     let optional = parse_optional(bytes, opt_off, coff.size_of_optional_header as usize)?;
 
     let section_off = opt_off + coff.size_of_optional_header as usize;
-    let section_headers = parse_section_headers(bytes, section_off, coff.number_of_sections as usize)?;
+    let section_headers =
+        parse_section_headers(bytes, section_off, coff.number_of_sections as usize)?;
     let mut sections = Vec::with_capacity(section_headers.len());
     for sh in &section_headers {
         sections.push(read_section(bytes, sh.clone())?);
@@ -214,7 +219,9 @@ fn parse_optional(bytes: &[u8], off: usize, size: usize) -> Result<OptionalHeade
             loader_flags: u32_at(bytes, off + 104)?,
             number_of_rva_and_sizes: u32_at(bytes, off + 108)?,
         })),
-        other => Err(PeError::Malformed(format!("unknown optional header magic {other:#x}"))),
+        other => Err(PeError::Malformed(format!(
+            "unknown optional header magic {other:#x}"
+        ))),
     }
 }
 
@@ -241,7 +248,11 @@ fn read_section(bytes: &[u8], sh: SectionHeader) -> Result<Section> {
     let raw = sh.size_of_raw_data as usize;
     let avail = bytes.len().saturating_sub(ptr);
     let n = raw.min(avail);
-    let mut data = if n > 0 { bytes[ptr..ptr + n].to_vec() } else { Vec::new() };
+    let mut data = if n > 0 {
+        bytes[ptr..ptr + n].to_vec()
+    } else {
+        Vec::new()
+    };
     let vs = sh.virtual_size as usize;
     if vs != 0 {
         match data.len().cmp(&vs) {
@@ -256,7 +267,10 @@ fn read_section(bytes: &[u8], sh: SectionHeader) -> Result<Section> {
 /// Parse the import table starting at `dir_rva` from an in-memory document.
 /// `pub(crate)` so the writer can check whether an existing directory still
 /// matches the document's rich imports (and skip re-rendering when it does).
-pub(crate) fn parse_imports_from_doc(doc: &PeDocument, dir_rva: Rva) -> Result<Vec<ImportDescriptor>> {
+pub(crate) fn parse_imports_from_doc(
+    doc: &PeDocument,
+    dir_rva: Rva,
+) -> Result<Vec<ImportDescriptor>> {
     let psize = ptr_size(doc.arch);
     let mut out = Vec::new();
     let mut i: usize = 0;
@@ -317,13 +331,18 @@ fn parse_thunks(doc: &PeDocument, thunk_rva: Rva, psize: usize) -> Result<Vec<Im
             break;
         }
         if ordinal_flag {
-            out.push(ImportFunction::Ordinal { ordinal: (val & 0xffff) as u16 });
+            out.push(ImportFunction::Ordinal {
+                ordinal: (val & 0xffff) as u16,
+            });
         } else {
             let name_rva = val as u32;
             let hint = u16::from_le_bytes(doc.read(Rva(name_rva), 2)?.try_into().unwrap());
-            let name = read_cstring(doc, Rva(name_rva).checked_add(2).ok_or_else(|| {
-                PeError::Malformed("hint/name RVA overflow".into())
-            })?)?;
+            let name = read_cstring(
+                doc,
+                Rva(name_rva)
+                    .checked_add(2)
+                    .ok_or_else(|| PeError::Malformed("hint/name RVA overflow".into()))?,
+            )?;
             out.push(ImportFunction::Name { hint, name });
         }
         i += 1;
@@ -332,7 +351,10 @@ fn parse_thunks(doc: &PeDocument, thunk_rva: Rva, psize: usize) -> Result<Vec<Im
 }
 
 /// Parse the export table described by directory entry `dd`.
-pub(crate) fn parse_exports_from_doc(doc: &PeDocument, dd: DataDirectory) -> Result<Option<ExportTable>> {
+pub(crate) fn parse_exports_from_doc(
+    doc: &PeDocument,
+    dd: DataDirectory,
+) -> Result<Option<ExportTable>> {
     let d = doc.read(dd.rva, 40)?;
     let base = u32::from_le_bytes(d[16..20].try_into().unwrap());
     let number_of_functions = u32::from_le_bytes(d[20..24].try_into().unwrap());
@@ -347,15 +369,36 @@ pub(crate) fn parse_exports_from_doc(doc: &PeDocument, dd: DataDirectory) -> Res
 
     let mut symbols = Vec::new();
     for i in 0..number_of_names {
-        let name_rva = u32::from_le_bytes(doc.read(Rva(addr_of_names).checked_add(i * 4).ok_or_else(|| {
-            PeError::Malformed("name pointer overflow".into())
-        })?, 4)?.try_into().unwrap());
-        let ord_idx = u16::from_le_bytes(doc.read(Rva(addr_of_name_ordinals).checked_add(i * 2).ok_or_else(|| {
-            PeError::Malformed("name ordinal overflow".into())
-        })?, 2)?.try_into().unwrap());
-        let func_rva = u32::from_le_bytes(doc.read(Rva(addr_of_functions).checked_add(ord_idx as u32 * 4).ok_or_else(|| {
-            PeError::Malformed("function address overflow".into())
-        })?, 4)?.try_into().unwrap());
+        let name_rva = u32::from_le_bytes(
+            doc.read(
+                Rva(addr_of_names)
+                    .checked_add(i * 4)
+                    .ok_or_else(|| PeError::Malformed("name pointer overflow".into()))?,
+                4,
+            )?
+            .try_into()
+            .unwrap(),
+        );
+        let ord_idx = u16::from_le_bytes(
+            doc.read(
+                Rva(addr_of_name_ordinals)
+                    .checked_add(i * 2)
+                    .ok_or_else(|| PeError::Malformed("name ordinal overflow".into()))?,
+                2,
+            )?
+            .try_into()
+            .unwrap(),
+        );
+        let func_rva = u32::from_le_bytes(
+            doc.read(
+                Rva(addr_of_functions)
+                    .checked_add(ord_idx as u32 * 4)
+                    .ok_or_else(|| PeError::Malformed("function address overflow".into()))?,
+                4,
+            )?
+            .try_into()
+            .unwrap(),
+        );
         let name = read_cstring(doc, Rva(name_rva))?;
         // A forwarder is an RVA that points back into the export directory.
         let forwarder = if func_rva >= dd.rva.get() && func_rva < dd_end {
@@ -383,9 +426,11 @@ pub(crate) fn parse_exports_from_doc(doc: &PeDocument, dd: DataDirectory) -> Res
 fn read_cstring(doc: &PeDocument, rva: Rva) -> Result<String> {
     let mut out = Vec::new();
     for i in 0..4096u32 {
-        let byte = doc.read(rva.checked_add(i).ok_or_else(|| {
-            PeError::Malformed("string RVA overflow".into())
-        })?, 1)?;
+        let byte = doc.read(
+            rva.checked_add(i)
+                .ok_or_else(|| PeError::Malformed("string RVA overflow".into()))?,
+            1,
+        )?;
         if byte[0] == 0 {
             break;
         }

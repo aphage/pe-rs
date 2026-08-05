@@ -1,8 +1,8 @@
 //! Mutating access to a [`PeDocument`].
 
 use crate::domain::{
-    align_up, CoffHeader, DataDirectory, DataDirectoryIndex, DosHeader, OptionalHeader, Rva,
-    Section, SectionHeader, SectionId,
+    CoffHeader, DataDirectory, DataDirectoryIndex, DosHeader, OptionalHeader, Rva, Section,
+    SectionHeader, SectionId, align_up,
 };
 use crate::error::{PeError, Result};
 
@@ -13,7 +13,12 @@ pub trait PeEditor {
     fn set_optional_header(&mut self, optional: OptionalHeader);
     fn set_data_directory(&mut self, index: DataDirectoryIndex, rva: Rva, size: u32) -> Result<()>;
     /// Append a new section at the end of the image.
-    fn add_section(&mut self, name: [u8; 8], characteristics: u32, data: Vec<u8>) -> Result<SectionId>;
+    fn add_section(
+        &mut self,
+        name: [u8; 8],
+        characteristics: u32,
+        data: Vec<u8>,
+    ) -> Result<SectionId>;
     fn remove_section(&mut self, id: SectionId) -> Result<()>;
     fn write(&mut self, rva: Rva, bytes: &[u8]) -> Result<()>;
     fn alloc(&mut self, size: usize, alignment: u32) -> Result<Rva>;
@@ -41,12 +46,22 @@ impl PeEditor for crate::domain::PeDocument {
         Ok(())
     }
 
-    fn add_section(&mut self, name: [u8; 8], characteristics: u32, data: Vec<u8>) -> Result<SectionId> {
+    fn add_section(
+        &mut self,
+        name: [u8; 8],
+        characteristics: u32,
+        data: Vec<u8>,
+    ) -> Result<SectionId> {
         let align = self.optional.section_alignment().max(1);
         let end = self
             .sections
             .iter()
-            .map(|s| s.header.virtual_address.get().saturating_add(s.data.len() as u32))
+            .map(|s| {
+                s.header
+                    .virtual_address
+                    .get()
+                    .saturating_add(s.data.len() as u32)
+            })
             .max()
             .unwrap_or(0);
         let va = align_up(end, align);
@@ -66,10 +81,14 @@ impl PeEditor for crate::domain::PeDocument {
 
     fn remove_section(&mut self, id: SectionId) -> Result<()> {
         if id >= self.sections.len() {
-            return Err(PeError::InvalidArgument(format!("remove_section: no section #{id}")));
+            return Err(PeError::InvalidArgument(format!(
+                "remove_section: no section #{id}"
+            )));
         }
         if self.sections.len() <= 1 {
-            return Err(PeError::InvalidArgument("remove_section: cannot remove the last section".into()));
+            return Err(PeError::InvalidArgument(
+                "remove_section: cannot remove the last section".into(),
+            ));
         }
         self.sections.remove(id);
         Ok(())

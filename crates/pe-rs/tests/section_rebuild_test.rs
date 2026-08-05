@@ -4,7 +4,7 @@ mod common;
 
 use pe_rs::api::PeViewer;
 use pe_rs::domain::section::{IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ};
-use pe_rs::domain::{align_up, RawOffset, Rva, Section, SectionHeader};
+use pe_rs::domain::{RawOffset, Rva, Section, SectionHeader, align_up};
 use pe_rs::feature::{merge_sections, rebuild_section_table};
 
 #[test]

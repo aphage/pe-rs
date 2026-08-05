@@ -20,13 +20,18 @@ pub trait ImportTableEditor {
     fn remove_import(&mut self, module: &str) -> Result<()>;
     /// Rebuild the physical import directory for `descriptors`, updating the
     /// rich form and the data directory, and return the result.
-    fn rebuild_import_table(&mut self, descriptors: &[ImportDescriptor]) -> Result<RebuiltImportTable>;
+    fn rebuild_import_table(
+        &mut self,
+        descriptors: &[ImportDescriptor],
+    ) -> Result<RebuiltImportTable>;
 }
 
 impl ImportTableEditor for crate::domain::PeDocument {
     fn add_import(&mut self, module: &str, functions: &[ImportFunction]) -> Result<()> {
         if module.is_empty() {
-            return Err(PeError::InvalidArgument("add_import: empty module name".into()));
+            return Err(PeError::InvalidArgument(
+                "add_import: empty module name".into(),
+            ));
         }
         match self.imports.iter_mut().find(|d| d.name == module) {
             Some(desc) => {
@@ -50,28 +55,48 @@ impl ImportTableEditor for crate::domain::PeDocument {
         let before = self.imports.len();
         self.imports.retain(|d| d.name != module);
         if self.imports.len() == before {
-            return Err(PeError::InvalidArgument(format!("remove_import: no import '{module}'")));
+            return Err(PeError::InvalidArgument(format!(
+                "remove_import: no import '{module}'"
+            )));
         }
         Ok(())
     }
 
-    fn rebuild_import_table(&mut self, descriptors: &[ImportDescriptor]) -> Result<RebuiltImportTable> {
+    fn rebuild_import_table(
+        &mut self,
+        descriptors: &[ImportDescriptor],
+    ) -> Result<RebuiltImportTable> {
         if descriptors.is_empty() {
-            return Err(PeError::InvalidArgument("rebuild_import_table: no descriptors".into()));
+            return Err(PeError::InvalidArgument(
+                "rebuild_import_table: no descriptors".into(),
+            ));
         }
         let alignment = self.optional.section_alignment().max(1);
         let image_end = self
             .sections
             .iter()
-            .map(|s| s.header.virtual_address.get().saturating_add(s.data.len() as u32))
+            .map(|s| {
+                s.header
+                    .virtual_address
+                    .get()
+                    .saturating_add(s.data.len() as u32)
+            })
             .max()
             .unwrap_or(0);
         let base = align_up(image_end, alignment);
         let rendered = render_import_table(descriptors, self.arch, Rva(base))?;
         let rva = self.alloc(rendered.blob.len(), alignment)?;
         self.write(rva, &rendered.blob)?;
-        self.set_data_directory(DataDirectoryIndex::Import, Rva(rendered.dir_rva), rendered.size)?;
-        self.set_data_directory(DataDirectoryIndex::Iat, Rva(rendered.iat_rva), rendered.iat_size)?;
+        self.set_data_directory(
+            DataDirectoryIndex::Import,
+            Rva(rendered.dir_rva),
+            rendered.size,
+        )?;
+        self.set_data_directory(
+            DataDirectoryIndex::Iat,
+            Rva(rendered.iat_rva),
+            rendered.iat_size,
+        )?;
         self.imports = descriptors.to_vec();
         Ok(RebuiltImportTable {
             rva,

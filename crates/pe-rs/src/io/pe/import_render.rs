@@ -11,7 +11,7 @@
 //! — this is the standard "fix dump" shape.
 
 use crate::domain::import::{ImportDescriptor, ImportFunction};
-use crate::domain::types::{ptr_size, Arch, Rva};
+use crate::domain::types::{Arch, Rva, ptr_size};
 use crate::error::{PeError, Result};
 
 fn put_u16(b: &mut [u8], off: usize, v: u16) {
@@ -98,9 +98,12 @@ pub fn render_import_table(
     }
 
     let mut blob = vec![0u8; cursor];
-    let rva = |off: usize| base_rva.get().checked_add(off as u32).ok_or_else(|| {
-        PeError::InvalidArgument("import table too large".into())
-    });
+    let rva = |off: usize| {
+        base_rva
+            .get()
+            .checked_add(off as u32)
+            .ok_or_else(|| PeError::InvalidArgument("import table too large".into()))
+    };
 
     // DLL name strings.
     for (m, desc) in imports.iter().enumerate() {

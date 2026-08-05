@@ -24,4 +24,4 @@ pub use iat::{
 pub use import::{ImportDescriptor, ImportFunction};
 pub use optional::OptionalHeader;
 pub use section::{Section, SectionHeader, SectionId};
-pub use types::{align_up, ptr_size, Arch, Machine, RawOffset, Rva};
+pub use types::{Arch, Machine, RawOffset, Rva, align_up, ptr_size};

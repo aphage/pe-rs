@@ -22,7 +22,10 @@ pub struct ByteSource {
 
 impl ByteSource {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, saved: RefCell::new(Vec::new()) }
+        Self {
+            bytes,
+            saved: RefCell::new(Vec::new()),
+        }
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -53,7 +56,9 @@ pub struct FileSource {
 
 impl FileSource {
     pub fn new(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf() }
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -85,19 +90,28 @@ impl PeFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let source = FileSource::new(path);
         let doc = source.load()?;
-        Ok(Self { source: Box::new(source), doc })
+        Ok(Self {
+            source: Box::new(source),
+            doc,
+        })
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         let source = ByteSource::new(bytes);
         let doc = source.load()?;
-        Ok(Self { source: Box::new(source), doc })
+        Ok(Self {
+            source: Box::new(source),
+            doc,
+        })
     }
 
     /// Open from an arbitrary source (e.g. `MockSource` in tests).
     pub fn from_source<S: PeSource + 'static>(source: S) -> Result<Self> {
         let doc = source.load()?;
-        Ok(Self { source: Box::new(source), doc })
+        Ok(Self {
+            source: Box::new(source),
+            doc,
+        })
     }
 
     pub fn doc(&self) -> &PeDocument {

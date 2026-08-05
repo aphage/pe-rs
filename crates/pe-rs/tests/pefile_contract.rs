@@ -25,11 +25,7 @@ fn pefile_doc_mut_edits_and_save_is_noop_for_mock() {
     file.doc_mut()
         .add_import("ntdll.dll", &[ImportFunction::by_name("NtClose")])
         .unwrap();
-    assert!(file
-        .doc()
-        .imports()
-        .iter()
-        .any(|d| d.name == "ntdll.dll"));
+    assert!(file.doc().imports().iter().any(|d| d.name == "ntdll.dll"));
     assert!(file.save().is_ok());
 }
 

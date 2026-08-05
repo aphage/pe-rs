@@ -61,7 +61,9 @@ impl PeDocument {
         let mut best: Option<Run> = None;
 
         for off in (0..len).step_by(psize) {
-            let Some(slot_rva) = start.checked_add(off as u32) else { break };
+            let Some(slot_rva) = start.checked_add(off as u32) else {
+                break;
+            };
             let slot_val = self.read(slot_rva, psize).ok().and_then(|b| {
                 let v = if psize == 8 {
                     u64::from_le_bytes(b.try_into().unwrap())
@@ -73,8 +75,14 @@ impl PeDocument {
 
             match slot_val {
                 Some(v) => {
-                    let run = current.get_or_insert_with(|| Run { base: slot_rva, entries: Vec::new() });
-                    run.entries.push(IatEntry { rva: slot_rva, value: v });
+                    let run = current.get_or_insert_with(|| Run {
+                        base: slot_rva,
+                        entries: Vec::new(),
+                    });
+                    run.entries.push(IatEntry {
+                        rva: slot_rva,
+                        value: v,
+                    });
                 }
                 None => {
                     if let Some(run) = current.take() {
@@ -103,7 +111,9 @@ impl PeDocument {
 
 fn consider(run: Run, min_entries: usize, best: &mut Option<Run>) {
     if run.entries.len() >= min_entries
-        && best.as_ref().is_none_or(|b| run.entries.len() > b.entries.len())
+        && best
+            .as_ref()
+            .is_none_or(|b| run.entries.len() > b.entries.len())
     {
         *best = Some(run);
     }

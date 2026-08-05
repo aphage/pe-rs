@@ -27,7 +27,10 @@ fn dos_header_has_mz() {
 fn optional_header_is_pe32_plus() {
     common::both(|doc| {
         assert_eq!(doc.optional_header().image_base(), MOCK_IMAGE_BASE);
-        assert_eq!(doc.optional_header().address_of_entry_point().get(), MOCK_TEXT_RVA);
+        assert_eq!(
+            doc.optional_header().address_of_entry_point().get(),
+            MOCK_TEXT_RVA
+        );
     });
 }
 
@@ -58,10 +61,12 @@ fn imports_match_canonical_table() {
         assert_eq!(imports[0].name, "kernel32.dll");
         assert_eq!(imports[0].functions.len(), 5);
         assert!(imports.iter().any(|d| d.name == "user32.dll"));
-        assert!(imports[0]
-            .functions
-            .iter()
-            .any(|f| f.name() == Some("GetProcAddress")));
+        assert!(
+            imports[0]
+                .functions
+                .iter()
+                .any(|f| f.name() == Some("GetProcAddress"))
+        );
     });
 }
 

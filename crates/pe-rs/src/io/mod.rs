@@ -9,7 +9,7 @@ pub mod pe;
 pub mod source;
 
 pub use mock::{
-    MockResolver, MockSource, MOCK_APIS_BASE, MOCK_IAT_RVA, MOCK_IDATA_RVA, MOCK_IMAGE_BASE,
-    MOCK_TEXT_RVA,
+    MOCK_APIS_BASE, MOCK_IAT_RVA, MOCK_IDATA_RVA, MOCK_IMAGE_BASE, MOCK_TEXT_RVA, MockResolver,
+    MockSource,
 };
 pub use source::{ByteSource, FileSource, PeFile, PeSource};
