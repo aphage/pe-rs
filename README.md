@@ -47,9 +47,12 @@ crates/pe-rs/src/
     └── source.rs   PeSource trait + PeFile facade + Byte/FileSource
 ```
 
-The domain model and every capability trait are shared; mock and real differ
-only in how a `PeDocument` is produced (fabricated vs. parsed). Contract tests
-run against both paths (see `tests/common`).
+The real parser reads every on-disk structure (DOS/COFF/Optional/section
+headers, import/export/resource/reloc/TLS directories) through the official
+`windows-sys` `IMAGE_*` definitions, then converts them into the crate's rich
+domain types. The domain model and every capability trait are shared; mock and
+real differ only in how a `PeDocument` is produced (fabricated vs. parsed).
+Contract tests run against both paths (see `tests/common`).
 
 ## Usage
 

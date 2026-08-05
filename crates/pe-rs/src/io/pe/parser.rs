@@ -1,4 +1,8 @@
 //! Real PE parser: bytes → [`PeDocument`].
+//!
+//! On-disk structures are read through the official `windows-sys`
+//! `IMAGE_*` definitions (`std::ptr::read_unaligned`), then converted into the
+//! crate's rich domain types.
 
 use crate::domain::PeDocument;
 use crate::domain::coff::CoffHeader;
@@ -17,11 +21,22 @@ use crate::domain::section::{Section, SectionHeader};
 use crate::domain::tls::TlsDirectory;
 use crate::domain::types::{Machine, RawOffset, Rva, ptr_size};
 use crate::error::{PeError, Result};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    IMAGE_DATA_DIRECTORY, IMAGE_FILE_HEADER, IMAGE_OPTIONAL_HEADER32, IMAGE_OPTIONAL_HEADER64,
+    IMAGE_SECTION_HEADER,
+};
+use windows_sys::Win32::System::SystemServices::{
+    IMAGE_BASE_RELOCATION, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_IMPORT_DESCRIPTOR,
+    IMAGE_RESOURCE_DATA_ENTRY, IMAGE_RESOURCE_DIRECTORY, IMAGE_RESOURCE_DIRECTORY_ENTRY,
+    IMAGE_TLS_DIRECTORY32, IMAGE_TLS_DIRECTORY64,
+};
 
 const PE_SIGNATURE: [u8; 4] = *b"PE\0\0";
 /// Upper bound for zero-padding a section to its virtual size; avoids unbounded
 /// allocation on corrupt headers.
 const MAX_SECTION_SIZE: usize = 0x1000_0000;
+/// Guard against cyclic/runaway resource trees.
+const MAX_RESOURCE_DEPTH: usize = 8;
 
 fn take(bytes: &[u8], off: usize, n: usize) -> Result<&[u8]> {
     bytes.get(off..off + n).ok_or_else(|| {
@@ -35,12 +50,30 @@ fn u16_at(bytes: &[u8], off: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(take(bytes, off, 2)?.try_into().unwrap()))
 }
 
-fn u32_at(bytes: &[u8], off: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(take(bytes, off, 4)?.try_into().unwrap()))
+/// Read a `#[repr(C)]` structure from a byte slice at `off` (unaligned).
+fn read_struct<T>(bytes: &[u8], off: usize) -> Result<T> {
+    let size = std::mem::size_of::<T>();
+    let end = off
+        .checked_add(size)
+        .ok_or_else(|| PeError::Malformed("structure size overflow".into()))?;
+    let src = bytes.get(off..end).ok_or_else(|| {
+        PeError::Malformed(format!(
+            "truncated at file offset {off:#x} (need {size} bytes)"
+        ))
+    })?;
+    // SAFETY: `T` is a plain `#[repr(C)]` structure of integers/arrays (never
+    // pointers or references), and `src` points to `size` fully-initialized
+    // bytes. This mirrors `bytemuck::pod_read_unaligned`.
+    Ok(unsafe { src.as_ptr().cast::<T>().read_unaligned() })
 }
 
-fn u64_at(bytes: &[u8], off: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(take(bytes, off, 8)?.try_into().unwrap()))
+/// Read a `#[repr(C)]` structure from the document's image at `rva`.
+fn read_doc_struct<T>(doc: &PeDocument, rva: Rva) -> Result<T> {
+    let size = std::mem::size_of::<T>();
+    let src = doc.read(rva, size)?;
+    // SAFETY: same as `read_struct` — `T` is a plain structure and `src` is
+    // `size` initialized bytes.
+    Ok(unsafe { src.as_ptr().cast::<T>().read_unaligned() })
 }
 
 /// Parse a PE file from raw bytes.
@@ -58,7 +91,8 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
 
     let coff = parse_coff(bytes, pe_off + 4)?;
     let opt_off = pe_off + 4 + 20;
-    let optional = parse_optional(bytes, opt_off, coff.size_of_optional_header as usize)?;
+    let (optional, dir_array) =
+        parse_optional(bytes, opt_off, coff.size_of_optional_header as usize)?;
 
     let section_off = opt_off + coff.size_of_optional_header as usize;
     let section_headers =
@@ -68,16 +102,12 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
         sections.push(read_section(bytes, sh.clone())?);
     }
 
-    let (dirs_off, nrs) = match &optional {
-        OptionalHeader::Bit32(_) => (opt_off + 96, optional.number_of_rva_and_sizes()),
-        OptionalHeader::Bit64(_) => (opt_off + 112, optional.number_of_rva_and_sizes()),
-    };
-    let n = (nrs as usize).min(DataDirectoryIndex::COUNT);
+    let n = (optional.number_of_rva_and_sizes() as usize).min(DataDirectoryIndex::COUNT);
     let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
     for (i, slot) in dirs.iter_mut().take(n).enumerate() {
         *slot = DataDirectory {
-            rva: Rva(u32_at(bytes, dirs_off + i * 8)?),
-            size: u32_at(bytes, dirs_off + i * 8 + 4)?,
+            rva: Rva(dir_array[i].VirtualAddress),
+            size: dir_array[i].Size,
         };
     }
 
@@ -128,123 +158,131 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
 }
 
 fn parse_dos(bytes: &[u8]) -> Result<DosHeader> {
-    let h = take(bytes, 0, 64)?;
-    let e_lfanew = u32_at(h, 0x3c)?;
-    let stub = bytes.get(64..e_lfanew as usize).unwrap_or(&[]).to_vec();
-    let res2 = std::array::from_fn(|i| u16_at(h, 0x28 + i * 2).unwrap());
+    let h: IMAGE_DOS_HEADER = read_struct(bytes, 0)?;
+    let e_lfanew = h.e_lfanew as usize;
+    let stub = bytes.get(64..e_lfanew).unwrap_or(&[]).to_vec();
     Ok(DosHeader {
-        e_magic: u16_at(h, 0)?,
-        e_cblp: u16_at(h, 0x02)?,
-        e_cp: u16_at(h, 0x04)?,
-        e_crlc: u16_at(h, 0x06)?,
-        e_cparhdr: u16_at(h, 0x08)?,
-        e_minalloc: u16_at(h, 0x0a)?,
-        e_maxalloc: u16_at(h, 0x0c)?,
-        e_ss: u16_at(h, 0x0e)?,
-        e_sp: u16_at(h, 0x10)?,
-        e_csum: u16_at(h, 0x12)?,
-        e_ip: u16_at(h, 0x14)?,
-        e_cs: u16_at(h, 0x16)?,
-        e_lfarlc: u16_at(h, 0x18)?,
-        e_ovno: u16_at(h, 0x1a)?,
-        e_res: [
-            u16_at(h, 0x1c)?,
-            u16_at(h, 0x1e)?,
-            u16_at(h, 0x20)?,
-            u16_at(h, 0x22)?,
-        ],
-        e_oemid: u16_at(h, 0x24)?,
-        e_oeminfo: u16_at(h, 0x26)?,
-        e_res2: res2,
-        e_lfanew,
+        e_magic: h.e_magic,
+        e_cblp: h.e_cblp,
+        e_cp: h.e_cp,
+        e_crlc: h.e_crlc,
+        e_cparhdr: h.e_cparhdr,
+        e_minalloc: h.e_minalloc,
+        e_maxalloc: h.e_maxalloc,
+        e_ss: h.e_ss,
+        e_sp: h.e_sp,
+        e_csum: h.e_csum,
+        e_ip: h.e_ip,
+        e_cs: h.e_cs,
+        e_lfarlc: h.e_lfarlc,
+        e_ovno: h.e_ovno,
+        e_res: h.e_res,
+        e_oemid: h.e_oemid,
+        e_oeminfo: h.e_oeminfo,
+        e_res2: h.e_res2,
+        e_lfanew: h.e_lfanew as u32,
         stub,
     })
 }
 
 fn parse_coff(bytes: &[u8], off: usize) -> Result<CoffHeader> {
-    let h = take(bytes, off, 20)?;
+    let h: IMAGE_FILE_HEADER = read_struct(bytes, off)?;
     Ok(CoffHeader {
-        machine: Machine::from_u16(u16_at(h, 0)?),
-        number_of_sections: u16_at(h, 2)?,
-        time_date_stamp: u32_at(h, 4)?,
-        pointer_to_symbol_table: u32_at(h, 8)?,
-        number_of_symbols: u32_at(h, 12)?,
-        size_of_optional_header: u16_at(h, 16)?,
-        characteristics: u16_at(h, 18)?,
+        machine: Machine::from_u16(h.Machine),
+        number_of_sections: h.NumberOfSections,
+        time_date_stamp: h.TimeDateStamp,
+        pointer_to_symbol_table: h.PointerToSymbolTable,
+        number_of_symbols: h.NumberOfSymbols,
+        size_of_optional_header: h.SizeOfOptionalHeader,
+        characteristics: h.Characteristics,
     })
 }
 
-fn parse_optional(bytes: &[u8], off: usize, size: usize) -> Result<OptionalHeader> {
+fn parse_optional(
+    bytes: &[u8],
+    off: usize,
+    size: usize,
+) -> Result<(OptionalHeader, [IMAGE_DATA_DIRECTORY; 16])> {
     if size < 96 {
         return Err(PeError::Malformed("optional header too small".into()));
     }
     let magic = u16_at(bytes, off)?;
-    let major_linker = bytes.get(off + 2).copied().unwrap_or(0);
-    let minor_linker = bytes.get(off + 3).copied().unwrap_or(0);
     match magic {
-        PE32_MAGIC => Ok(OptionalHeader::Bit32(OptionalHeader32 {
-            magic,
-            major_linker_version: major_linker,
-            minor_linker_version: minor_linker,
-            size_of_code: u32_at(bytes, off + 4)?,
-            size_of_initialized_data: u32_at(bytes, off + 8)?,
-            size_of_uninitialized_data: u32_at(bytes, off + 12)?,
-            address_of_entry_point: Rva(u32_at(bytes, off + 16)?),
-            base_of_code: Rva(u32_at(bytes, off + 20)?),
-            base_of_data: Rva(u32_at(bytes, off + 24)?),
-            image_base: u32_at(bytes, off + 28)?,
-            section_alignment: u32_at(bytes, off + 32)?,
-            file_alignment: u32_at(bytes, off + 36)?,
-            major_operating_system_version: u16_at(bytes, off + 40)?,
-            minor_operating_system_version: u16_at(bytes, off + 42)?,
-            major_image_version: u16_at(bytes, off + 44)?,
-            minor_image_version: u16_at(bytes, off + 46)?,
-            major_subsystem_version: u16_at(bytes, off + 48)?,
-            minor_subsystem_version: u16_at(bytes, off + 50)?,
-            win32_version_value: u32_at(bytes, off + 52)?,
-            size_of_image: u32_at(bytes, off + 56)?,
-            size_of_headers: u32_at(bytes, off + 60)?,
-            checksum: u32_at(bytes, off + 64)?,
-            subsystem: u16_at(bytes, off + 68)?,
-            dll_characteristics: u16_at(bytes, off + 70)?,
-            size_of_stack_reserve: u32_at(bytes, off + 72)?,
-            size_of_stack_commit: u32_at(bytes, off + 76)?,
-            size_of_heap_reserve: u32_at(bytes, off + 80)?,
-            size_of_heap_commit: u32_at(bytes, off + 84)?,
-            loader_flags: u32_at(bytes, off + 88)?,
-            number_of_rva_and_sizes: u32_at(bytes, off + 92)?,
-        })),
-        PE32_PLUS_MAGIC => Ok(OptionalHeader::Bit64(OptionalHeader64 {
-            magic,
-            major_linker_version: major_linker,
-            minor_linker_version: minor_linker,
-            size_of_code: u32_at(bytes, off + 4)?,
-            size_of_initialized_data: u32_at(bytes, off + 8)?,
-            size_of_uninitialized_data: u32_at(bytes, off + 12)?,
-            address_of_entry_point: Rva(u32_at(bytes, off + 16)?),
-            base_of_code: Rva(u32_at(bytes, off + 20)?),
-            image_base: u64_at(bytes, off + 24)?,
-            section_alignment: u32_at(bytes, off + 32)?,
-            file_alignment: u32_at(bytes, off + 36)?,
-            major_operating_system_version: u16_at(bytes, off + 40)?,
-            minor_operating_system_version: u16_at(bytes, off + 42)?,
-            major_image_version: u16_at(bytes, off + 44)?,
-            minor_image_version: u16_at(bytes, off + 46)?,
-            major_subsystem_version: u16_at(bytes, off + 48)?,
-            minor_subsystem_version: u16_at(bytes, off + 50)?,
-            win32_version_value: u32_at(bytes, off + 52)?,
-            size_of_image: u32_at(bytes, off + 56)?,
-            size_of_headers: u32_at(bytes, off + 60)?,
-            checksum: u32_at(bytes, off + 64)?,
-            subsystem: u16_at(bytes, off + 68)?,
-            dll_characteristics: u16_at(bytes, off + 70)?,
-            size_of_stack_reserve: u64_at(bytes, off + 72)?,
-            size_of_stack_commit: u64_at(bytes, off + 80)?,
-            size_of_heap_reserve: u64_at(bytes, off + 88)?,
-            size_of_heap_commit: u64_at(bytes, off + 96)?,
-            loader_flags: u32_at(bytes, off + 104)?,
-            number_of_rva_and_sizes: u32_at(bytes, off + 108)?,
-        })),
+        PE32_MAGIC => {
+            let h: IMAGE_OPTIONAL_HEADER32 = read_struct(bytes, off)?;
+            Ok((
+                OptionalHeader::Bit32(OptionalHeader32 {
+                    magic: h.Magic,
+                    major_linker_version: h.MajorLinkerVersion,
+                    minor_linker_version: h.MinorLinkerVersion,
+                    size_of_code: h.SizeOfCode,
+                    size_of_initialized_data: h.SizeOfInitializedData,
+                    size_of_uninitialized_data: h.SizeOfUninitializedData,
+                    address_of_entry_point: Rva(h.AddressOfEntryPoint),
+                    base_of_code: Rva(h.BaseOfCode),
+                    base_of_data: Rva(h.BaseOfData),
+                    image_base: h.ImageBase,
+                    section_alignment: h.SectionAlignment,
+                    file_alignment: h.FileAlignment,
+                    major_operating_system_version: h.MajorOperatingSystemVersion,
+                    minor_operating_system_version: h.MinorOperatingSystemVersion,
+                    major_image_version: h.MajorImageVersion,
+                    minor_image_version: h.MinorImageVersion,
+                    major_subsystem_version: h.MajorSubsystemVersion,
+                    minor_subsystem_version: h.MinorSubsystemVersion,
+                    win32_version_value: h.Win32VersionValue,
+                    size_of_image: h.SizeOfImage,
+                    size_of_headers: h.SizeOfHeaders,
+                    checksum: h.CheckSum,
+                    subsystem: h.Subsystem,
+                    dll_characteristics: h.DllCharacteristics,
+                    size_of_stack_reserve: h.SizeOfStackReserve,
+                    size_of_stack_commit: h.SizeOfStackCommit,
+                    size_of_heap_reserve: h.SizeOfHeapReserve,
+                    size_of_heap_commit: h.SizeOfHeapCommit,
+                    loader_flags: h.LoaderFlags,
+                    number_of_rva_and_sizes: h.NumberOfRvaAndSizes,
+                }),
+                h.DataDirectory,
+            ))
+        }
+        PE32_PLUS_MAGIC => {
+            let h: IMAGE_OPTIONAL_HEADER64 = read_struct(bytes, off)?;
+            Ok((
+                OptionalHeader::Bit64(OptionalHeader64 {
+                    magic: h.Magic,
+                    major_linker_version: h.MajorLinkerVersion,
+                    minor_linker_version: h.MinorLinkerVersion,
+                    size_of_code: h.SizeOfCode,
+                    size_of_initialized_data: h.SizeOfInitializedData,
+                    size_of_uninitialized_data: h.SizeOfUninitializedData,
+                    address_of_entry_point: Rva(h.AddressOfEntryPoint),
+                    base_of_code: Rva(h.BaseOfCode),
+                    image_base: h.ImageBase,
+                    section_alignment: h.SectionAlignment,
+                    file_alignment: h.FileAlignment,
+                    major_operating_system_version: h.MajorOperatingSystemVersion,
+                    minor_operating_system_version: h.MinorOperatingSystemVersion,
+                    major_image_version: h.MajorImageVersion,
+                    minor_image_version: h.MinorImageVersion,
+                    major_subsystem_version: h.MajorSubsystemVersion,
+                    minor_subsystem_version: h.MinorSubsystemVersion,
+                    win32_version_value: h.Win32VersionValue,
+                    size_of_image: h.SizeOfImage,
+                    size_of_headers: h.SizeOfHeaders,
+                    checksum: h.CheckSum,
+                    subsystem: h.Subsystem,
+                    dll_characteristics: h.DllCharacteristics,
+                    size_of_stack_reserve: h.SizeOfStackReserve,
+                    size_of_stack_commit: h.SizeOfStackCommit,
+                    size_of_heap_reserve: h.SizeOfHeapReserve,
+                    size_of_heap_commit: h.SizeOfHeapCommit,
+                    loader_flags: h.LoaderFlags,
+                    number_of_rva_and_sizes: h.NumberOfRvaAndSizes,
+                }),
+                h.DataDirectory,
+            ))
+        }
         other => Err(PeError::Malformed(format!(
             "unknown optional header magic {other:#x}"
         ))),
@@ -254,16 +292,14 @@ fn parse_optional(bytes: &[u8], off: usize, size: usize) -> Result<OptionalHeade
 fn parse_section_headers(bytes: &[u8], off: usize, n: usize) -> Result<Vec<SectionHeader>> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let h = take(bytes, off + i * 40, 40)?;
-        let mut name = [0u8; 8];
-        name.copy_from_slice(&h[0..8]);
+        let h: IMAGE_SECTION_HEADER = read_struct(bytes, off + i * 40)?;
         out.push(SectionHeader {
-            name,
-            virtual_size: u32_at(h, 8)?,
-            virtual_address: Rva(u32_at(h, 12)?),
-            size_of_raw_data: u32_at(h, 16)?,
-            pointer_to_raw_data: RawOffset(u32_at(h, 20)?),
-            characteristics: u32_at(h, 36)?,
+            name: h.Name,
+            virtual_size: unsafe { h.Misc.VirtualSize },
+            virtual_address: Rva(h.VirtualAddress),
+            size_of_raw_data: h.SizeOfRawData,
+            pointer_to_raw_data: RawOffset(h.PointerToRawData),
+            characteristics: h.Characteristics,
         });
     }
     Ok(out)
@@ -305,21 +341,22 @@ pub(crate) fn parse_imports_from_doc(
             Some(v) if v <= u32::MAX as u64 => Rva(v as u32),
             _ => break,
         };
-        let d = match doc.read(desc_rva, 20) {
-            Ok(b) => b,
+        let d: IMAGE_IMPORT_DESCRIPTOR = match read_doc_struct(doc, desc_rva) {
+            Ok(d) => d,
             Err(_) => break, // past the table / unmapped
         };
-        if d.iter().all(|&b| b == 0) {
+        if unsafe { d.Anonymous.OriginalFirstThunk } == 0 && d.Name == 0 && d.FirstThunk == 0 {
             break;
         }
-        let oft = u32::from_le_bytes(d[0..4].try_into().unwrap());
-        let name_rva = u32::from_le_bytes(d[12..16].try_into().unwrap());
-        let ft = u32::from_le_bytes(d[16..20].try_into().unwrap());
-        let thunk_rva = if oft != 0 { oft } else { ft };
+        let thunk_rva = if unsafe { d.Anonymous.OriginalFirstThunk } != 0 {
+            unsafe { d.Anonymous.OriginalFirstThunk }
+        } else {
+            d.FirstThunk
+        };
         if thunk_rva == 0 {
             break;
         }
-        let name = read_cstring(doc, Rva(name_rva))?;
+        let name = read_cstring(doc, Rva(d.Name))?;
         let functions = parse_thunks(doc, Rva(thunk_rva), psize)?;
         out.push(ImportDescriptor { name, functions });
         i += 1;
@@ -381,14 +418,14 @@ pub(crate) fn parse_exports_from_doc(
     doc: &PeDocument,
     dd: DataDirectory,
 ) -> Result<Option<ExportTable>> {
-    let d = doc.read(dd.rva, 40)?;
-    let base = u32::from_le_bytes(d[16..20].try_into().unwrap());
-    let number_of_functions = u32::from_le_bytes(d[20..24].try_into().unwrap());
-    let number_of_names = u32::from_le_bytes(d[24..28].try_into().unwrap());
-    let addr_of_functions = u32::from_le_bytes(d[28..32].try_into().unwrap());
-    let addr_of_names = u32::from_le_bytes(d[32..36].try_into().unwrap());
-    let addr_of_name_ordinals = u32::from_le_bytes(d[36..40].try_into().unwrap());
-    let module_name_rva = u32::from_le_bytes(d[12..16].try_into().unwrap());
+    let d: IMAGE_EXPORT_DIRECTORY = read_doc_struct(doc, dd.rva)?;
+    let base = d.Base;
+    let number_of_functions = d.NumberOfFunctions;
+    let number_of_names = d.NumberOfNames;
+    let addr_of_functions = d.AddressOfFunctions;
+    let addr_of_names = d.AddressOfNames;
+    let addr_of_name_ordinals = d.AddressOfNameOrdinals;
+    let module_name_rva = d.Name;
 
     let module_name = read_cstring(doc, Rva(module_name_rva)).ok();
     let dd_end = dd.rva.get().saturating_add(dd.size);
@@ -468,9 +505,6 @@ fn read_cstring(doc: &PeDocument, rva: Rva) -> Result<String> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// Guard against cyclic/runaway resource trees.
-const MAX_RESOURCE_DEPTH: usize = 8;
-
 /// Parse the resource directory tree rooted at `dd`.
 pub(crate) fn parse_resources_from_doc(
     doc: &PeDocument,
@@ -488,40 +522,40 @@ fn parse_resource_directory(
     if depth > MAX_RESOURCE_DEPTH {
         return Err(PeError::Malformed("resource directory too deep".into()));
     }
-    let hdr = doc.read(dir_rva, 16)?;
-    let named = u16::from_le_bytes(hdr[12..14].try_into().unwrap());
-    let ids = u16::from_le_bytes(hdr[14..16].try_into().unwrap());
-    let n = named as usize + ids as usize;
+    let h: IMAGE_RESOURCE_DIRECTORY = read_doc_struct(doc, dir_rva)?;
+    let n = h.NumberOfNamedEntries as usize + h.NumberOfIdEntries as usize;
 
     let mut entries = Vec::with_capacity(n);
     for i in 0..n {
         let entry_rva = dir_rva
             .checked_add(16 + i as u32 * 8)
             .ok_or_else(|| PeError::Malformed("resource entry overflow".into()))?;
-        let e = doc.read(entry_rva, 8)?;
-        let name_field = u32::from_le_bytes(e[0..4].try_into().unwrap());
-        let data_field = u32::from_le_bytes(e[4..8].try_into().unwrap());
+        let e: IMAGE_RESOURCE_DIRECTORY_ENTRY = read_doc_struct(doc, entry_rva)?;
 
-        let name = if name_field & 0x8000_0000 != 0 {
-            ResourceName::Named(read_resource_name(doc, base, name_field & 0x7fff_ffff)?)
+        let name = if unsafe { e.Anonymous1.Name } & 0x8000_0000 != 0 {
+            ResourceName::Named(read_resource_name(
+                doc,
+                base,
+                unsafe { e.Anonymous1.Name } & 0x7fff_ffff,
+            )?)
         } else {
-            ResourceName::Id(name_field)
+            ResourceName::Id(unsafe { e.Anonymous1.Name })
         };
 
-        let data = if data_field & 0x8000_0000 != 0 {
+        let data = if unsafe { e.Anonymous2.OffsetToData } & 0x8000_0000 != 0 {
             let sub = base
-                .checked_add(data_field & 0x7fff_ffff)
+                .checked_add(unsafe { e.Anonymous2.OffsetToData } & 0x7fff_ffff)
                 .ok_or_else(|| PeError::Malformed("resource subdir overflow".into()))?;
             ResourceEntryData::Directory(parse_resource_directory(doc, base, sub, depth + 1)?)
         } else {
             let data_rva = base
-                .checked_add(data_field)
+                .checked_add(unsafe { e.Anonymous2.OffsetToData })
                 .ok_or_else(|| PeError::Malformed("resource data overflow".into()))?;
-            let de = doc.read(data_rva, 16)?;
+            let de: IMAGE_RESOURCE_DATA_ENTRY = read_doc_struct(doc, data_rva)?;
             ResourceEntryData::Leaf(ResourceDataEntry {
-                rva: Rva(u32::from_le_bytes(de[0..4].try_into().unwrap())),
-                size: u32::from_le_bytes(de[4..8].try_into().unwrap()),
-                code_page: u32::from_le_bytes(de[8..12].try_into().unwrap()),
+                rva: Rva(de.OffsetToData),
+                size: de.Size,
+                code_page: de.CodePage,
             })
         };
         entries.push(ResourceEntry { name, data });
@@ -570,9 +604,9 @@ pub(crate) fn parse_relocations_from_doc(
             .rva
             .checked_add(off as u32)
             .ok_or_else(|| PeError::Malformed("reloc block overflow".into()))?;
-        let hdr = doc.read(block_rva, 8)?;
-        let page = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-        let size = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+        let h: IMAGE_BASE_RELOCATION = read_doc_struct(doc, block_rva)?;
+        let page = h.VirtualAddress;
+        let size = h.SizeOfBlock;
         if page == 0 && size == 0 {
             break; // terminator block
         }
@@ -605,26 +639,25 @@ pub(crate) fn parse_relocations_from_doc(
 
 /// Parse the TLS directory described by `dd`.
 pub(crate) fn parse_tls_from_doc(doc: &PeDocument, dd: DataDirectory) -> Result<TlsDirectory> {
-    let psize = ptr_size(doc.arch);
-    let size = if psize == 8 { 48 } else { 24 };
-    let b = doc.read(dd.rva, size)?;
-    if psize == 8 {
+    if ptr_size(doc.arch) == 8 {
+        let h: IMAGE_TLS_DIRECTORY64 = read_doc_struct(doc, dd.rva)?;
         Ok(TlsDirectory {
-            start_address_of_raw_data: u64::from_le_bytes(b[0..8].try_into().unwrap()),
-            end_address_of_raw_data: u64::from_le_bytes(b[8..16].try_into().unwrap()),
-            address_of_index: u64::from_le_bytes(b[16..24].try_into().unwrap()),
-            address_of_callbacks: u64::from_le_bytes(b[24..32].try_into().unwrap()),
-            size_of_zero_fill: u32::from_le_bytes(b[32..36].try_into().unwrap()),
-            characteristics: u32::from_le_bytes(b[36..40].try_into().unwrap()),
+            start_address_of_raw_data: h.StartAddressOfRawData,
+            end_address_of_raw_data: h.EndAddressOfRawData,
+            address_of_index: h.AddressOfIndex,
+            address_of_callbacks: h.AddressOfCallBacks,
+            size_of_zero_fill: h.SizeOfZeroFill,
+            characteristics: unsafe { h.Anonymous.Characteristics },
         })
     } else {
+        let h: IMAGE_TLS_DIRECTORY32 = read_doc_struct(doc, dd.rva)?;
         Ok(TlsDirectory {
-            start_address_of_raw_data: u32::from_le_bytes(b[0..4].try_into().unwrap()) as u64,
-            end_address_of_raw_data: u32::from_le_bytes(b[4..8].try_into().unwrap()) as u64,
-            address_of_index: u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64,
-            address_of_callbacks: u32::from_le_bytes(b[12..16].try_into().unwrap()) as u64,
-            size_of_zero_fill: u32::from_le_bytes(b[16..20].try_into().unwrap()),
-            characteristics: u32::from_le_bytes(b[20..24].try_into().unwrap()),
+            start_address_of_raw_data: h.StartAddressOfRawData as u64,
+            end_address_of_raw_data: h.EndAddressOfRawData as u64,
+            address_of_index: h.AddressOfIndex as u64,
+            address_of_callbacks: h.AddressOfCallBacks as u64,
+            size_of_zero_fill: h.SizeOfZeroFill,
+            characteristics: unsafe { h.Anonymous.Characteristics },
         })
     }
 }
