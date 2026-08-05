@@ -19,7 +19,7 @@ pub use document::PeDocument;
 pub use dos::DosHeader;
 pub use export::{ExportSymbol, ExportTable};
 pub use iat::{
-    IatEntry, IatFixOptions, IatFixReport, IatScan, ScanMethod, ScanOptions,
+    IatEntry, IatFixOptions, IatFixReport, IatScan, RebuiltImportTable, ScanMethod, ScanOptions,
 };
 pub use import::{ImportDescriptor, ImportFunction};
 pub use optional::OptionalHeader;

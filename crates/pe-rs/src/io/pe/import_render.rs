@@ -47,6 +47,9 @@ pub struct RenderedImport {
     pub size: u32,
     /// Combined byte size of all IAT (FirstThunk) arrays.
     pub iat_size: u32,
+    /// Thunk value of each function, in descriptor order (used for IAT
+    /// redirection).
+    pub thunk_values: Vec<u64>,
 }
 
 /// Render `imports` into a blob based at `base_rva`.
@@ -106,6 +109,8 @@ pub fn render_import_table(
         blob[off + desc.name.len()] = 0;
     }
 
+    let total_functions = imports.iter().map(|d| d.functions.len()).sum();
+    let mut thunk_values = Vec::with_capacity(total_functions);
     let mut fi = 0; // flattened function index
     for (m, desc) in imports.iter().enumerate() {
         // Descriptor.
@@ -127,6 +132,7 @@ pub fn render_import_table(
                 }
                 ImportFunction::Ordinal { ordinal } => high_bit | (*ordinal as u64),
             };
+            thunk_values.push(thunk);
             put_thunk(&mut blob, int_off[m] + k * psize, psize, thunk);
             put_thunk(&mut blob, iat_off[m] + k * psize, psize, thunk);
             fi += 1;
@@ -145,6 +151,7 @@ pub fn render_import_table(
         iat_rva: base_rva.get().saturating_add(iat_off[0] as u32),
         size,
         iat_size,
+        thunk_values,
     })
 }
 

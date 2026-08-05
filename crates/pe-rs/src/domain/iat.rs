@@ -75,3 +75,19 @@ pub struct IatFixReport {
     /// Size in bytes of the newly built import table.
     pub new_import_size: usize,
 }
+
+/// Outcome of rebuilding the physical import table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuiltImportTable {
+    /// RVA of the new descriptor array.
+    pub rva: Rva,
+    /// Size in bytes of the new import table.
+    pub size: u32,
+    /// RVA of the first FirstThunk (IAT) array.
+    pub iat_rva: Rva,
+    /// Combined size in bytes of all FirstThunk arrays.
+    pub iat_size: u32,
+    /// New thunk value for each function, in descriptor order. This is the
+    /// value that belongs in the (redirected) IAT slot for that function.
+    pub thunk_values: Vec<u64>,
+}
