@@ -6,9 +6,12 @@ use crate::domain::dos::DosHeader;
 use crate::domain::export::ExportTable;
 use crate::domain::import::ImportDescriptor;
 use crate::domain::optional::OptionalHeader;
+use crate::domain::relocation::RelocationTable;
+use crate::domain::resource::ResourceDirectory;
 use crate::domain::section::{
     IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, Section, SectionHeader,
 };
+use crate::domain::tls::TlsDirectory;
 use crate::domain::types::{Arch, RawOffset, Rva, align_up};
 use crate::error::{PeError, Result};
 
@@ -27,6 +30,12 @@ pub struct PeDocument {
     /// Parsed, rich form of the import table.
     pub imports: Vec<ImportDescriptor>,
     pub exports: Option<ExportTable>,
+    /// Parsed resource directory tree.
+    pub resources: Option<ResourceDirectory>,
+    /// Parsed base relocation table.
+    pub relocations: Option<RelocationTable>,
+    /// Parsed TLS directory.
+    pub tls: Option<TlsDirectory>,
 }
 
 impl PeDocument {

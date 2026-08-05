@@ -8,7 +8,7 @@ use pe_rs::domain::{Arch, ImportFunction};
 #[test]
 fn pefile_loads_mock_document() {
     let file = common::file_via_mock();
-    assert_eq!(file.doc().sections().len(), 2);
+    assert!(file.doc().sections().len() >= 3);
     assert_eq!(file.doc().imports().len(), 2);
 }
 

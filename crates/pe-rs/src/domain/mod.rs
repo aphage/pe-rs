@@ -10,7 +10,10 @@ pub mod export;
 pub mod iat;
 pub mod import;
 pub mod optional;
+pub mod relocation;
+pub mod resource;
 pub mod section;
+pub mod tls;
 pub mod types;
 
 pub use coff::CoffHeader;
@@ -23,5 +26,10 @@ pub use iat::{
 };
 pub use import::{ImportDescriptor, ImportFunction};
 pub use optional::OptionalHeader;
+pub use relocation::{RelocationBlock, RelocationEntry, RelocationTable};
+pub use resource::{
+    ResourceDataEntry, ResourceDirectory, ResourceEntry, ResourceEntryData, ResourceName,
+};
 pub use section::{Section, SectionHeader, SectionId};
+pub use tls::TlsDirectory;
 pub use types::{Arch, Machine, RawOffset, Rva, align_up, ptr_size};

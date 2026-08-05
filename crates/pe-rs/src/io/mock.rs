@@ -15,10 +15,18 @@ use crate::domain::dos::{DOS_MAGIC, DosHeader};
 use crate::domain::optional::{
     IMAGE_SUBSYSTEM_WINDOWS_CUI, OptionalHeader, OptionalHeader64, PE32_PLUS_MAGIC,
 };
+use crate::domain::relocation::{
+    IMAGE_REL_BASED_HIGHLOW, RelocationBlock, RelocationEntry, RelocationTable,
+};
+use crate::domain::resource::{
+    RT_MANIFEST, ResourceDataEntry, ResourceDirectory, ResourceEntry, ResourceEntryData,
+    ResourceName,
+};
 use crate::domain::section::{
     IMAGE_SCN_CNT_CODE, IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
     IMAGE_SCN_MEM_WRITE, Section, SectionHeader,
 };
+use crate::domain::tls::TlsDirectory;
 use crate::domain::{
     Arch, CoffHeader, ExportSymbol, ExportTable, ImportDescriptor, ImportFunction, Machine,
     PeDocument, RawOffset, Rva,
@@ -40,6 +48,8 @@ pub const MOCK_IAT_OFFSET_IN_IDATA: usize = 0x80;
 pub const MOCK_IAT_RVA: u32 = MOCK_IDATA_RVA + MOCK_IAT_OFFSET_IN_IDATA as u32;
 pub const MOCK_SECTION_ALIGNMENT: u32 = 0x1000;
 pub const MOCK_FILE_ALIGNMENT: u32 = 0x200;
+/// RVA of the `.rsrc` section (holds resource / relocation / TLS data).
+pub const MOCK_RSRC_RVA: u32 = 0x3000;
 
 /// The canonical import table the mock document carries.
 pub fn mock_imports() -> Vec<ImportDescriptor> {
@@ -130,6 +140,52 @@ pub fn document() -> PeDocument {
         data: idata,
     };
 
+    // `.rsrc`: hand-built resource directory tree + one base-reloc block + one
+    // TLS directory, so the directory parsers have real data to read. The raw
+    // bytes here must match the rich forms stored on the document below.
+    let manifest = b"<assembly manifestVersion=\"1.0\"></assembly>";
+    let mut rsrc = vec![0u8; 0x100];
+    // root directory: 1 ID entry
+    rsrc[14..16].copy_from_slice(&1u16.to_le_bytes());
+    // root entry: type 24 (manifest), subdirectory at 0x20
+    rsrc[0x10..0x14].copy_from_slice(&RT_MANIFEST.to_le_bytes());
+    rsrc[0x14..0x18].copy_from_slice(&(0x8000_0000u32 | 0x20).to_le_bytes());
+    // name-level directory: 1 ID entry
+    rsrc[0x20 + 14..0x20 + 16].copy_from_slice(&1u16.to_le_bytes());
+    // name entry: ID 1, subdirectory at 0x40
+    rsrc[0x30..0x34].copy_from_slice(&1u32.to_le_bytes());
+    rsrc[0x34..0x38].copy_from_slice(&(0x8000_0000u32 | 0x40).to_le_bytes());
+    // language directory: 1 ID entry
+    rsrc[0x40 + 14..0x40 + 16].copy_from_slice(&1u16.to_le_bytes());
+    // language entry: 0x409, leaf data entry at 0x60
+    rsrc[0x50..0x54].copy_from_slice(&0x409u32.to_le_bytes());
+    rsrc[0x54..0x58].copy_from_slice(&0x60u32.to_le_bytes());
+    // data entry at 0x60: manifest bytes at 0x70
+    rsrc[0x60..0x64].copy_from_slice(&(MOCK_RSRC_RVA + 0x70).to_le_bytes());
+    rsrc[0x64..0x68].copy_from_slice(&(manifest.len() as u32).to_le_bytes());
+    rsrc[0x70..0x70 + manifest.len()].copy_from_slice(manifest);
+    // base relocation block at 0xA0: one HIGHLOW entry at offset 0x10
+    rsrc[0xA0..0xA4].copy_from_slice(&0x1000u32.to_le_bytes());
+    rsrc[0xA4..0xA8].copy_from_slice(&10u32.to_le_bytes());
+    rsrc[0xA8..0xAA]
+        .copy_from_slice(&(((IMAGE_REL_BASED_HIGHLOW as u16) << 12) | 0x10).to_le_bytes());
+    // terminator block at 0xAC (zeros); TLS directory at 0xC0
+    rsrc[0xC0..0xC8].copy_from_slice(&(MOCK_IMAGE_BASE + 0x1000).to_le_bytes());
+    rsrc[0xC8..0xD0].copy_from_slice(&(MOCK_IMAGE_BASE + 0x1100).to_le_bytes());
+    rsrc[0xD0..0xD8].copy_from_slice(&(MOCK_IMAGE_BASE + 0x2000).to_le_bytes());
+    // callbacks / zero-fill / characteristics stay zero
+    let rsrc = Section {
+        header: SectionHeader {
+            name: *b".rsrc\0\0\0",
+            virtual_size: rsrc.len() as u32,
+            virtual_address: Rva(MOCK_RSRC_RVA),
+            size_of_raw_data: 0x200,
+            pointer_to_raw_data: RawOffset(0x600),
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+        },
+        data: rsrc,
+    };
+
     let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
     dirs[DataDirectoryIndex::Import.to_usize()] = DataDirectory {
         rva: Rva(MOCK_IDATA_RVA),
@@ -138,6 +194,18 @@ pub fn document() -> PeDocument {
     dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory {
         rva: Rva(MOCK_IAT_RVA),
         size: iat_bytes as u32,
+    };
+    dirs[DataDirectoryIndex::Resource.to_usize()] = DataDirectory {
+        rva: Rva(MOCK_RSRC_RVA),
+        size: 0x80,
+    };
+    dirs[DataDirectoryIndex::BaseReloc.to_usize()] = DataDirectory {
+        rva: Rva(MOCK_RSRC_RVA + 0xA0),
+        size: 0x1C,
+    };
+    dirs[DataDirectoryIndex::Tls.to_usize()] = DataDirectory {
+        rva: Rva(MOCK_RSRC_RVA + 0xC0),
+        size: 0x30,
     };
 
     PeDocument {
@@ -149,7 +217,7 @@ pub fn document() -> PeDocument {
         },
         coff: CoffHeader {
             machine: Machine::Amd64,
-            number_of_sections: 2,
+            number_of_sections: 3,
             time_date_stamp: 0x5c0a_1234,
             pointer_to_symbol_table: 0,
             number_of_symbols: 0,
@@ -175,7 +243,7 @@ pub fn document() -> PeDocument {
             major_subsystem_version: 6,
             minor_subsystem_version: 0,
             win32_version_value: 0,
-            size_of_image: 0x3000,
+            size_of_image: 0x4000,
             size_of_headers: 0x200,
             checksum: 0,
             subsystem: IMAGE_SUBSYSTEM_WINDOWS_CUI,
@@ -187,7 +255,7 @@ pub fn document() -> PeDocument {
             loader_flags: 0,
             number_of_rva_and_sizes: 16,
         }),
-        sections: vec![text, idata],
+        sections: vec![text, idata, rsrc],
         data_directories: dirs,
         exports: Some(ExportTable {
             module_name: Some("mock.exe".to_string()),
@@ -209,6 +277,43 @@ pub fn document() -> PeDocument {
             ],
         }),
         imports,
+        resources: Some(ResourceDirectory {
+            entries: vec![ResourceEntry {
+                name: ResourceName::Id(RT_MANIFEST),
+                data: ResourceEntryData::Directory(ResourceDirectory {
+                    entries: vec![ResourceEntry {
+                        name: ResourceName::Id(1),
+                        data: ResourceEntryData::Directory(ResourceDirectory {
+                            entries: vec![ResourceEntry {
+                                name: ResourceName::Id(0x409),
+                                data: ResourceEntryData::Leaf(ResourceDataEntry {
+                                    rva: Rva(MOCK_RSRC_RVA + 0x70),
+                                    size: manifest.len() as u32,
+                                    code_page: 0,
+                                }),
+                            }],
+                        }),
+                    }],
+                }),
+            }],
+        }),
+        relocations: Some(RelocationTable {
+            blocks: vec![RelocationBlock {
+                page_rva: Rva(0x1000),
+                entries: vec![RelocationEntry {
+                    reloc_type: IMAGE_REL_BASED_HIGHLOW,
+                    offset: 0x10,
+                }],
+            }],
+        }),
+        tls: Some(TlsDirectory {
+            start_address_of_raw_data: MOCK_IMAGE_BASE + 0x1000,
+            end_address_of_raw_data: MOCK_IMAGE_BASE + 0x1100,
+            address_of_index: MOCK_IMAGE_BASE + 0x2000,
+            address_of_callbacks: 0,
+            size_of_zero_fill: 0,
+            characteristics: 0,
+        }),
     }
 }
 

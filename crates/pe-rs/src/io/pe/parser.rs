@@ -9,7 +9,12 @@ use crate::domain::import::{ImportDescriptor, ImportFunction};
 use crate::domain::optional::{
     OptionalHeader, OptionalHeader32, OptionalHeader64, PE32_MAGIC, PE32_PLUS_MAGIC,
 };
+use crate::domain::relocation::{RelocationBlock, RelocationEntry, RelocationTable};
+use crate::domain::resource::{
+    ResourceDataEntry, ResourceDirectory, ResourceEntry, ResourceEntryData, ResourceName,
+};
 use crate::domain::section::{Section, SectionHeader};
+use crate::domain::tls::TlsDirectory;
 use crate::domain::types::{Machine, RawOffset, Rva, ptr_size};
 use crate::error::{PeError, Result};
 
@@ -85,6 +90,9 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
         data_directories: dirs,
         imports: Vec::new(),
         exports: None,
+        resources: None,
+        relocations: None,
+        tls: None,
     };
 
     // Rich directory parsing is lenient: a broken directory yields an empty
@@ -96,6 +104,24 @@ pub fn parse(bytes: &[u8]) -> Result<PeDocument> {
     let export_dir = doc.data_directory(DataDirectoryIndex::Export).ok().copied();
     if let Some(dd) = export_dir.filter(|dd| dd.rva != Rva::NULL) {
         doc.exports = parse_exports_from_doc(&doc, dd).ok().flatten();
+    }
+    let resource_dir = doc
+        .data_directory(DataDirectoryIndex::Resource)
+        .ok()
+        .copied();
+    if let Some(dd) = resource_dir.filter(|dd| dd.rva != Rva::NULL) {
+        doc.resources = parse_resources_from_doc(&doc, dd).ok();
+    }
+    let reloc_dir = doc
+        .data_directory(DataDirectoryIndex::BaseReloc)
+        .ok()
+        .copied();
+    if let Some(dd) = reloc_dir.filter(|dd| dd.rva != Rva::NULL) {
+        doc.relocations = parse_relocations_from_doc(&doc, dd).ok();
+    }
+    let tls_dir = doc.data_directory(DataDirectoryIndex::Tls).ok().copied();
+    if let Some(dd) = tls_dir.filter(|dd| dd.rva != Rva::NULL) {
+        doc.tls = parse_tls_from_doc(&doc, dd).ok();
     }
 
     Ok(doc)
@@ -440,4 +466,165 @@ fn read_cstring(doc: &PeDocument, rva: Rva) -> Result<String> {
         return Err(PeError::Malformed("unterminated string".into()));
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Guard against cyclic/runaway resource trees.
+const MAX_RESOURCE_DEPTH: usize = 8;
+
+/// Parse the resource directory tree rooted at `dd`.
+pub(crate) fn parse_resources_from_doc(
+    doc: &PeDocument,
+    dd: DataDirectory,
+) -> Result<ResourceDirectory> {
+    parse_resource_directory(doc, dd.rva, dd.rva, 0)
+}
+
+fn parse_resource_directory(
+    doc: &PeDocument,
+    base: Rva,
+    dir_rva: Rva,
+    depth: usize,
+) -> Result<ResourceDirectory> {
+    if depth > MAX_RESOURCE_DEPTH {
+        return Err(PeError::Malformed("resource directory too deep".into()));
+    }
+    let hdr = doc.read(dir_rva, 16)?;
+    let named = u16::from_le_bytes(hdr[12..14].try_into().unwrap());
+    let ids = u16::from_le_bytes(hdr[14..16].try_into().unwrap());
+    let n = named as usize + ids as usize;
+
+    let mut entries = Vec::with_capacity(n);
+    for i in 0..n {
+        let entry_rva = dir_rva
+            .checked_add(16 + i as u32 * 8)
+            .ok_or_else(|| PeError::Malformed("resource entry overflow".into()))?;
+        let e = doc.read(entry_rva, 8)?;
+        let name_field = u32::from_le_bytes(e[0..4].try_into().unwrap());
+        let data_field = u32::from_le_bytes(e[4..8].try_into().unwrap());
+
+        let name = if name_field & 0x8000_0000 != 0 {
+            ResourceName::Named(read_resource_name(doc, base, name_field & 0x7fff_ffff)?)
+        } else {
+            ResourceName::Id(name_field)
+        };
+
+        let data = if data_field & 0x8000_0000 != 0 {
+            let sub = base
+                .checked_add(data_field & 0x7fff_ffff)
+                .ok_or_else(|| PeError::Malformed("resource subdir overflow".into()))?;
+            ResourceEntryData::Directory(parse_resource_directory(doc, base, sub, depth + 1)?)
+        } else {
+            let data_rva = base
+                .checked_add(data_field)
+                .ok_or_else(|| PeError::Malformed("resource data overflow".into()))?;
+            let de = doc.read(data_rva, 16)?;
+            ResourceEntryData::Leaf(ResourceDataEntry {
+                rva: Rva(u32::from_le_bytes(de[0..4].try_into().unwrap())),
+                size: u32::from_le_bytes(de[4..8].try_into().unwrap()),
+                code_page: u32::from_le_bytes(de[8..12].try_into().unwrap()),
+            })
+        };
+        entries.push(ResourceEntry { name, data });
+    }
+    Ok(ResourceDirectory { entries })
+}
+
+/// Read a `IMAGE_RESOURCE_DIR_STRING_U` (UTF-16LE length-prefixed) name.
+fn read_resource_name(doc: &PeDocument, base: Rva, offset: u32) -> Result<String> {
+    let rva = base
+        .checked_add(offset)
+        .ok_or_else(|| PeError::Malformed("resource name overflow".into()))?;
+    let len = u16::from_le_bytes(doc.read(rva, 2)?.try_into().unwrap());
+    if len > 0x1000 {
+        return Err(PeError::Malformed("resource name too long".into()));
+    }
+    let bytes = doc.read(
+        rva.checked_add(2)
+            .ok_or_else(|| PeError::Malformed("resource name overflow".into()))?,
+        len as usize * 2,
+    )?;
+    let units: Vec<u16> = bytes
+        .chunks(2)
+        .map(|c| u16::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    Ok(String::from_utf16_lossy(&units))
+}
+
+/// Parse the base relocation table described by `dd`.
+pub(crate) fn parse_relocations_from_doc(
+    doc: &PeDocument,
+    dd: DataDirectory,
+) -> Result<RelocationTable> {
+    let extent = if dd.size != 0 {
+        dd.size as usize
+    } else {
+        0x1000
+    };
+    let mut blocks = Vec::new();
+    let mut off = 0usize;
+    loop {
+        if off + 8 > extent {
+            break;
+        }
+        let block_rva = dd
+            .rva
+            .checked_add(off as u32)
+            .ok_or_else(|| PeError::Malformed("reloc block overflow".into()))?;
+        let hdr = doc.read(block_rva, 8)?;
+        let page = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+        let size = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+        if page == 0 && size == 0 {
+            break; // terminator block
+        }
+        if size < 8 {
+            break; // malformed block
+        }
+        let entry_bytes = doc.read(
+            block_rva
+                .checked_add(8)
+                .ok_or_else(|| PeError::Malformed("reloc block overflow".into()))?,
+            size as usize - 8,
+        )?;
+        let count = (size as usize - 8) / 2;
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let v = u16::from_le_bytes(entry_bytes[i * 2..i * 2 + 2].try_into().unwrap());
+            entries.push(RelocationEntry {
+                reloc_type: (v >> 12) as u8,
+                offset: v & 0x0fff,
+            });
+        }
+        blocks.push(RelocationBlock {
+            page_rva: Rva(page),
+            entries,
+        });
+        off += size as usize;
+    }
+    Ok(RelocationTable { blocks })
+}
+
+/// Parse the TLS directory described by `dd`.
+pub(crate) fn parse_tls_from_doc(doc: &PeDocument, dd: DataDirectory) -> Result<TlsDirectory> {
+    let psize = ptr_size(doc.arch);
+    let size = if psize == 8 { 48 } else { 24 };
+    let b = doc.read(dd.rva, size)?;
+    if psize == 8 {
+        Ok(TlsDirectory {
+            start_address_of_raw_data: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            end_address_of_raw_data: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            address_of_index: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+            address_of_callbacks: u64::from_le_bytes(b[24..32].try_into().unwrap()),
+            size_of_zero_fill: u32::from_le_bytes(b[32..36].try_into().unwrap()),
+            characteristics: u32::from_le_bytes(b[36..40].try_into().unwrap()),
+        })
+    } else {
+        Ok(TlsDirectory {
+            start_address_of_raw_data: u32::from_le_bytes(b[0..4].try_into().unwrap()) as u64,
+            end_address_of_raw_data: u32::from_le_bytes(b[4..8].try_into().unwrap()) as u64,
+            address_of_index: u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64,
+            address_of_callbacks: u32::from_le_bytes(b[12..16].try_into().unwrap()) as u64,
+            size_of_zero_fill: u32::from_le_bytes(b[16..20].try_into().unwrap()),
+            characteristics: u32::from_le_bytes(b[20..24].try_into().unwrap()),
+        })
+    }
 }

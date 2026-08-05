@@ -80,7 +80,8 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 - [x] Phase 6–8 — IAT scanner (resolver + opcode-pattern), IAT fixer (import table rebuild + redirect), manual IAT array
 - [x] Phase 9 — Raw↔VA conversion, section table rebuild/merge
 - [x] Opcode-pattern IAT scan (`ScanMethod::OpcodePattern`)
-- [ ] Rich parsing/editing of resource / relocation / TLS / LoadConfig directories
+- [x] Resource / relocation / TLS directory parsing (view)
+- [ ] Editing of resource / relocation / TLS / LoadConfig directories
 - [ ] Section merging across non-contiguous ranges (RVA remap)
 - [ ] Process-level features for the GUI (dump live process, inline hooks, tracer, ScyllaHide)
 - [ ] GUI application (crates/pe-rs-gui)
