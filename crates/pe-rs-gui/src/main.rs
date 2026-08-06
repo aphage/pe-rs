@@ -14,6 +14,10 @@ use pe_rs::domain::{
 };
 use pe_rs::io::pe::{parse, serialize};
 use pe_rs::process::{self, ProcessResolver};
+use std::sync::mpsc;
+
+/// Result of an async file dialog (picked path, or `None` if cancelled).
+type PickResult = Option<std::path::PathBuf>;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -77,6 +81,10 @@ struct PeEditorApp {
     new_section_size: u32,
     new_import_module: String,
     new_import_func: String,
+    /// Pending async "open file" dialog result.
+    pick_rx: Option<mpsc::Receiver<PickResult>>,
+    /// Pending async "save file" dialog result.
+    save_rx: Option<mpsc::Receiver<PickResult>>,
 }
 
 impl PeEditorApp {
@@ -212,6 +220,54 @@ impl PeEditorApp {
         }
     }
 
+    /// Open a native file dialog on a background thread (avoids blocking the
+    /// egui event loop); the result lands in `pick_rx`.
+    fn open_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Open PE file")
+                .add_filter("PE files", &["exe", "dll", "sys"])
+                .pick_file();
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        });
+        self.pick_rx = Some(rx);
+    }
+
+    /// Open a native "save as" dialog on a background thread.
+    fn save_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Save PE file")
+                .add_filter("PE files", &["exe", "dll", "sys"])
+                .set_file_name("fixed.bin")
+                .save_file();
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        });
+        self.save_rx = Some(rx);
+    }
+
+    /// Collect a completed async dialog result, clearing the pending slot.
+    fn drain_pick(rx: &mut Option<mpsc::Receiver<PickResult>>) -> PickResult {
+        let r = rx.as_ref()?;
+        match r.try_recv() {
+            Ok(f) => {
+                rx.take();
+                f
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                rx.take();
+                None
+            }
+        }
+    }
+
     fn apply_headers(&mut self) {
         let Some(doc) = self.doc.as_mut() else {
             return;
@@ -228,6 +284,16 @@ impl PeEditorApp {
 
 impl eframe::App for PeEditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Apply results of async file dialogs (spawned on background threads).
+        if let Some(path) = Self::drain_pick(&mut self.pick_rx) {
+            self.path = path.to_string_lossy().into_owned();
+            self.load_file();
+        }
+        if let Some(path) = Self::drain_pick(&mut self.save_rx) {
+            self.save_path = path.to_string_lossy().into_owned();
+            self.save();
+        }
+
         // Drag-and-drop a PE file onto the window.
         let dropped: Vec<_> = ui.ctx().input(|i| i.raw.dropped_files.clone());
         if let Some(file) = dropped.first() {
@@ -241,13 +307,16 @@ impl eframe::App for PeEditorApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("PE:");
-                let resp = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(300.0));
                 let enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
                 if resp.lost_focus() && enter {
                     self.load_file();
                 }
                 if ui.button("Load").clicked() {
                     self.load_file();
+                }
+                if ui.button("Browse…").clicked() {
+                    self.open_dialog(ui.ctx());
                 }
 
                 ui.separator();
@@ -270,7 +339,10 @@ impl eframe::App for PeEditorApp {
             });
             ui.horizontal(|ui| {
                 ui.label("Save as:");
-                ui.add(egui::TextEdit::singleline(&mut self.save_path).desired_width(360.0));
+                ui.add(egui::TextEdit::singleline(&mut self.save_path).desired_width(300.0));
+                if ui.button("Save As…").clicked() {
+                    self.save_dialog(ui.ctx());
+                }
                 ui.label(&self.status);
             });
         });

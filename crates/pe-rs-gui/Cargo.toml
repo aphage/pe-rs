@@ -11,3 +11,4 @@ publish = false
 [dependencies]
 pe-rs = { path = "../pe-rs" }
 eframe = { version = "0.36.0", default-features = false, features = ["glow", "default_fonts"] }
+rfd = "0.17.2"
