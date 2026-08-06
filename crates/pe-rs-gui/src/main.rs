@@ -1,12 +1,17 @@
 //! Scylla-style PE editor GUI built on the `pe-rs` library.
 //!
-//! Load a PE file (path, or drag-and-drop), inspect headers / sections /
-//! imports / exports / directories, dump a live process, scan & fix its IAT,
-//! and save the result.
+//! Load a PE file (path, or drag-and-drop), inspect and edit headers /
+//! sections / imports / exports / directories, dump a live process, scan &
+//! fix its IAT, and save the result.
 
 use eframe::egui;
-use pe_rs::api::{IatFixer, IatScanner, PeViewer};
-use pe_rs::domain::{DataDirectoryIndex, IatFixOptions, IatScan, PeDocument, ScanOptions};
+use pe_rs::api::{IatFixer, IatScanner, ImportTableEditor, PeEditor, PeViewer};
+use pe_rs::domain::section::{
+    IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
+};
+use pe_rs::domain::{
+    DataDirectoryIndex, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva, ScanOptions,
+};
 use pe_rs::io::pe::{parse, serialize};
 use pe_rs::process::{self, ProcessResolver};
 
@@ -46,6 +51,17 @@ impl Tab {
     }
 }
 
+/// Editable optional-header fields (synced from the document on load, applied
+/// with the Apply button).
+#[derive(Default)]
+struct HeaderEdits {
+    image_base: u64,
+    entry_point: u32,
+    section_alignment: u32,
+    file_alignment: u32,
+    subsystem: u16,
+}
+
 #[derive(Default)]
 struct PeEditorApp {
     path: String,
@@ -56,15 +72,32 @@ struct PeEditorApp {
     scan: Option<IatScan>,
     status: String,
     tab: Tab,
+    header_edits: HeaderEdits,
+    new_section_name: String,
+    new_section_size: u32,
+    new_import_module: String,
+    new_import_func: String,
 }
 
 impl PeEditorApp {
+    fn sync_header_edits(&mut self) {
+        if let Some(doc) = &self.doc {
+            let e = &mut self.header_edits;
+            e.image_base = doc.optional_header().image_base();
+            e.entry_point = doc.optional_header().address_of_entry_point().get();
+            e.section_alignment = doc.optional_header().section_alignment();
+            e.file_alignment = doc.optional_header().file_alignment();
+            e.subsystem = doc.optional_header().subsystem();
+        }
+    }
+
     fn load_file(&mut self) {
         self.scan = None;
         match std::fs::read(&self.path) {
             Ok(bytes) => match parse(&bytes) {
                 Ok(doc) => {
                     self.doc = Some(doc);
+                    self.sync_header_edits();
                     self.status = format!("loaded {}", self.path);
                 }
                 Err(e) => self.status = format!("parse failed: {e}"),
@@ -86,6 +119,7 @@ impl PeEditorApp {
             Ok(doc) => {
                 self.resolver = ProcessResolver::for_process(pid).ok();
                 self.doc = Some(doc);
+                self.sync_header_edits();
                 self.status = format!("dumped pid {pid}");
             }
             Err(e) => self.status = format!("dump failed: {e}"),
@@ -177,6 +211,19 @@ impl PeEditorApp {
             Err(e) => self.status = format!("serialize failed: {e}"),
         }
     }
+
+    fn apply_headers(&mut self) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let e = &self.header_edits;
+        doc.optional.set_image_base(e.image_base);
+        doc.optional.set_address_of_entry_point(Rva(e.entry_point));
+        doc.optional.set_section_alignment(e.section_alignment);
+        doc.optional.set_file_alignment(e.file_alignment);
+        doc.optional.set_subsystem(e.subsystem);
+        self.status = "headers applied".into();
+    }
 }
 
 impl eframe::App for PeEditorApp {
@@ -237,90 +284,91 @@ impl eframe::App for PeEditorApp {
                 }
             });
             ui.separator();
-            match &self.doc {
-                Some(doc) => self.show_doc(ui, doc),
-                None => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Open a PE file or dump a process to begin.");
-                    });
-                }
+            if self.doc.is_some() {
+                self.show_doc(ui);
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Open a PE file or dump a process to begin.");
+                });
             }
         });
     }
 }
 
 impl PeEditorApp {
-    fn show_doc(&self, ui: &mut egui::Ui, doc: &PeDocument) {
+    fn show_doc(&mut self, ui: &mut egui::Ui) {
         match self.tab {
-            Tab::Headers => self.show_headers(ui, doc),
-            Tab::Sections => self.show_sections(ui, doc),
-            Tab::Imports => self.show_imports(ui, doc),
-            Tab::Exports => self.show_exports(ui, doc),
-            Tab::Directories => self.show_directories(ui, doc),
+            Tab::Headers => self.show_headers(ui),
+            Tab::Sections => self.show_sections(ui),
+            Tab::Imports => self.show_imports(ui),
+            Tab::Exports => self.show_exports(ui),
+            Tab::Directories => self.show_directories(ui),
             Tab::Iat => self.show_iat(ui),
         }
     }
 
-    fn show_headers(&self, ui: &mut egui::Ui, doc: &PeDocument) {
+    fn show_headers(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("headers")
             .num_columns(2)
             .striped(true)
             .show(ui, |ui| {
-                ui.label("Arch");
-                ui.label(format!("{:?}", doc.arch()));
-                ui.end_row();
-                ui.label("Machine");
-                ui.label(format!("{:?}", doc.coff_header().machine));
-                ui.end_row();
                 ui.label("Image base");
-                ui.label(format!("{:#x}", doc.optional_header().image_base()));
+                ui.add(
+                    egui::DragValue::new(&mut self.header_edits.image_base)
+                        .hexadecimal(16, false, true),
+                );
                 ui.end_row();
                 ui.label("Entry point");
-                ui.label(format!(
-                    "{:#x}",
-                    doc.optional_header().address_of_entry_point().get()
-                ));
+                ui.add(
+                    egui::DragValue::new(&mut self.header_edits.entry_point)
+                        .hexadecimal(8, false, true),
+                );
+                ui.end_row();
+                ui.label("Section alignment");
+                ui.add(
+                    egui::DragValue::new(&mut self.header_edits.section_alignment)
+                        .hexadecimal(8, false, true),
+                );
+                ui.end_row();
+                ui.label("File alignment");
+                ui.add(
+                    egui::DragValue::new(&mut self.header_edits.file_alignment)
+                        .hexadecimal(8, false, true),
+                );
                 ui.end_row();
                 ui.label("Subsystem");
-                ui.label(format!("{}", doc.optional_header().subsystem()));
-                ui.end_row();
-                ui.label("Sections");
-                ui.label(format!("{}", doc.sections().len()));
+                ui.add(
+                    egui::DragValue::new(&mut self.header_edits.subsystem)
+                        .hexadecimal(4, false, true),
+                );
                 ui.end_row();
                 ui.label("Imports");
-                ui.label(format!("{} modules", doc.imports().len()));
+                ui.label(format!(
+                    "{} modules",
+                    self.doc.as_ref().map(|d| d.imports().len()).unwrap_or(0)
+                ));
                 ui.end_row();
                 ui.label("Exports");
                 ui.label(format!(
                     "{} symbols",
-                    doc.exports().map(|e| e.symbols.len()).unwrap_or(0)
-                ));
-                ui.end_row();
-                ui.label("Relocations");
-                ui.label(format!(
-                    "{} blocks",
-                    doc.relocations().map(|t| t.blocks.len()).unwrap_or(0)
-                ));
-                ui.end_row();
-                ui.label("Security cookie");
-                ui.label(format!(
-                    "{:#x}",
-                    doc.load_config().map(|l| l.security_cookie).unwrap_or(0)
-                ));
-                ui.end_row();
-                ui.label("CFG guard flags");
-                ui.label(format!(
-                    "{:#x}",
-                    doc.load_config().map(|l| l.guard_flags).unwrap_or(0)
+                    self.doc
+                        .as_ref()
+                        .and_then(|d| d.exports())
+                        .map(|e| e.symbols.len())
+                        .unwrap_or(0)
                 ));
                 ui.end_row();
             });
+        if ui.button("Apply header edits").clicked() {
+            self.apply_headers();
+        }
     }
 
-    fn show_sections(&self, ui: &mut egui::Ui, doc: &PeDocument) {
+    fn show_sections(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.doc.as_mut() else { return };
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("sections")
-                .num_columns(5)
+                .num_columns(6)
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Name");
@@ -328,28 +376,59 @@ impl PeEditorApp {
                     ui.label("VSize");
                     ui.label("RawSize");
                     ui.label("Chars");
+                    ui.label("");
                     ui.end_row();
-                    for s in doc.sections() {
+                    let mut remove: Option<usize> = None;
+                    for (i, s) in doc.sections().iter().enumerate() {
                         ui.label(s.name_str());
                         ui.label(format!("{:#x}", s.header.virtual_address.get()));
                         ui.label(format!("{:#x}", s.header.virtual_size));
                         ui.label(format!("{:#x}", s.header.size_of_raw_data));
                         ui.label(format!("{:#x}", s.header.characteristics));
+                        if ui.button("Remove").clicked() {
+                            remove = Some(i);
+                        }
                         ui.end_row();
+                    }
+                    if let Some(i) = remove
+                        && let Err(e) = doc.remove_section(i)
+                    {
+                        self.status = format!("remove failed: {e}");
                     }
                 });
         });
+        ui.horizontal(|ui| {
+            ui.label("Add section:");
+            ui.add(egui::TextEdit::singleline(&mut self.new_section_name).desired_width(70.0));
+            ui.add(egui::DragValue::new(&mut self.new_section_size));
+            if ui.button("Add").clicked() {
+                let name = self.new_section_name.clone();
+                let size = self.new_section_size as usize;
+                let mut name_bytes = [0u8; 8];
+                let n = name.len().min(8);
+                name_bytes[..n].copy_from_slice(&name.as_bytes()[..n]);
+                let chars =
+                    IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+                match doc.add_section(name_bytes, chars, vec![0; size]) {
+                    Ok(_) => self.status = format!("added section {name}"),
+                    Err(e) => self.status = format!("add failed: {e}"),
+                }
+            }
+        });
     }
 
-    fn show_imports(&self, ui: &mut egui::Ui, doc: &PeDocument) {
+    fn show_imports(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.doc.as_mut() else { return };
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("imports")
-                .num_columns(2)
+                .num_columns(3)
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Module");
                     ui.label("Functions");
+                    ui.label("");
                     ui.end_row();
+                    let mut remove: Option<String> = None;
                     for d in doc.imports() {
                         ui.label(&d.name);
                         ui.label(
@@ -359,13 +438,35 @@ impl PeEditorApp {
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         );
+                        if ui.button("Remove").clicked() {
+                            remove = Some(d.name.clone());
+                        }
                         ui.end_row();
+                    }
+                    if let Some(m) = remove
+                        && let Err(e) = doc.remove_import(&m)
+                    {
+                        self.status = format!("remove import failed: {e}");
                     }
                 });
         });
+        ui.horizontal(|ui| {
+            ui.label("Add import:");
+            ui.add(egui::TextEdit::singleline(&mut self.new_import_module).desired_width(130.0));
+            ui.add(egui::TextEdit::singleline(&mut self.new_import_func).desired_width(130.0));
+            if ui.button("Add").clicked() {
+                let module = self.new_import_module.clone();
+                let func = self.new_import_func.clone();
+                match doc.add_import(&module, &[ImportFunction::by_name(func.clone())]) {
+                    Ok(()) => self.status = format!("added import {module}!{func}"),
+                    Err(e) => self.status = format!("add import failed: {e}"),
+                }
+            }
+        });
     }
 
-    fn show_exports(&self, ui: &mut egui::Ui, doc: &PeDocument) {
+    fn show_exports(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.doc.as_ref() else { return };
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("exports")
                 .num_columns(3)
@@ -387,7 +488,8 @@ impl PeEditorApp {
         });
     }
 
-    fn show_directories(&self, ui: &mut egui::Ui, doc: &PeDocument) {
+    fn show_directories(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.doc.as_ref() else { return };
         egui::Grid::new("dirs")
             .num_columns(3)
             .striped(true)
@@ -409,7 +511,7 @@ impl PeEditorApp {
             });
     }
 
-    fn show_iat(&self, ui: &mut egui::Ui) {
+    fn show_iat(&mut self, ui: &mut egui::Ui) {
         match &self.scan {
             Some(scan) => {
                 ui.label(format!(

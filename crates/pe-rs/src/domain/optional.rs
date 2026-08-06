@@ -217,4 +217,8 @@ impl OptionalHeader {
     pub fn set_checksum(&mut self, v: u32) {
         set!(self, checksum, v);
     }
+
+    pub fn set_subsystem(&mut self, v: u16) {
+        set!(self, subsystem, v);
+    }
 }
