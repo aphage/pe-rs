@@ -23,8 +23,10 @@ array** addition. It is the library a future GUI PE editor will be built on
 - `IatScanner` — locate the IAT in the image (resolver-based, with region and
   min-entries options, grouping across the per-module NULL separators of a real
   IAT), or by `ScanMethod::CodeReference` (disassembles the code sections with
-  iced-x86 and keeps slots dereferenced by direct memory operands; signature
-  scan for protected dumps with `validate_slots: false`)
+  iced-x86, keeps the direct memory operands of Scylla's IAT-reference opcode
+  set — call/jmp/push/mov/lea — and returns the full referenced-slot set for
+  curation with `IatTable`; signature scan for protected dumps with
+  `validate_slots: false`)
 - `IatFixer::fix_iat` — resolve IAT entries to `(module, function)`, rebuild the
   import directory (descriptors + INT/IAT arrays + name strings) and optionally
   **redirect** the original IAT slots to the new thunks

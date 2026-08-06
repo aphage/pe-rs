@@ -150,6 +150,9 @@ impl PeDocument {
             let mut decoder = Decoder::with_ip(bitness, data, lo as u64, DecoderOptions::NONE);
             while decoder.can_decode() {
                 let insn = decoder.decode();
+                if !is_iat_reference_insn(&insn) {
+                    continue;
+                }
                 let slot_rva = if insn.is_ip_rel_memory_operand() {
                     // Target of a RIP/EIP-relative operand, already an RVA.
                     let t = insn.ip_rel_memory_address();
@@ -270,4 +273,14 @@ fn is_absolute_memory_operand(insn: &Instruction) -> bool {
     insn.op_kinds().any(|k| k == OpKind::Memory)
         && insn.memory_base() == Register::None
         && insn.memory_index() == Register::None
+}
+
+/// Whether `insn` is one of the IAT-reference instruction families Scylla
+/// accepts in `IATReferenceScan::isIatReferenceOpcodes`: `call`/`jmp`/`push`
+/// (opcode FF), `mov` (8B/89/A0-A3/C6/C7) and `lea` (8D). Narrow and
+/// arithmetic / SIMD memory operands (movzx/movsx, add/sub/cmp, movaps, ...)
+/// are excluded, so global-data references contribute less noise.
+fn is_iat_reference_insn(insn: &Instruction) -> bool {
+    use iced_x86::Mnemonic::{Call, Jmp, Lea, Mov, Push};
+    matches!(insn.mnemonic(), Call | Jmp | Push | Mov | Lea)
 }
