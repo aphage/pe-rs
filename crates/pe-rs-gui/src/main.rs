@@ -10,7 +10,8 @@ use pe_rs::domain::section::{
     IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
 };
 use pe_rs::domain::{
-    DataDirectoryIndex, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva, ScanOptions,
+    DataDirectoryIndex, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva, ScanMethod,
+    ScanOptions,
 };
 use pe_rs::io::pe::{parse, serialize};
 use pe_rs::process::{self, ProcessInfo, ProcessResolver};
@@ -74,6 +75,9 @@ struct PeEditorApp {
     doc: Option<PeDocument>,
     resolver: Option<ProcessResolver>,
     scan: Option<IatScan>,
+    /// Scan method used by the "Scan IAT" button (Resolver / Code references /
+    /// Reflection — see `ScanMethod`).
+    scan_method: ScanMethod,
     status: String,
     tab: Tab,
     header_edits: HeaderEdits,
@@ -89,6 +93,16 @@ struct PeEditorApp {
     processes: Vec<ProcessInfo>,
     process_filter: String,
     show_process_picker: bool,
+}
+
+/// Human-readable label for a scan method (used in the toolbar selector and
+/// the status bar).
+fn scan_method_name(m: ScanMethod) -> &'static str {
+    match m {
+        ScanMethod::Resolver => "Resolver",
+        ScanMethod::CodeReference => "Code references",
+        ScanMethod::Reflection => "Reflection",
+    }
 }
 
 impl PeEditorApp {
@@ -147,17 +161,23 @@ impl PeEditorApp {
             self.status = "no process resolver — dump a process first".into();
             return;
         };
-        match doc.scan(resolver, &ScanOptions::default()) {
+        let method = self.scan_method;
+        let opts = ScanOptions {
+            method,
+            ..Default::default()
+        };
+        match doc.scan(resolver, &opts) {
             Ok(scan) => {
                 self.status = format!(
-                    "IAT at {:#x}, {} entries",
+                    "scan ({}) — IAT at {:#x}, {} entries",
+                    scan_method_name(method),
                     scan.base_rva.get(),
                     scan.entries.len()
                 );
                 self.scan = Some(scan);
             }
             Err(e) => {
-                self.status = format!("scan failed: {e}");
+                self.status = format!("scan ({}) failed: {e}", scan_method_name(method));
                 self.scan = None;
             }
         }
@@ -335,6 +355,37 @@ impl eframe::App for PeEditorApp {
                 }
 
                 ui.separator();
+                ui.label("Method:").on_hover_text(
+                    "Resolver: values that resolve via the process modules\n\
+                     Code references: disassemble code sections for direct memory operands\n\
+                     Reflection: recover the IAT from the PE structure (overwritten OriginalFirstThunk / IAT directory)",
+                );
+                let mut method_changed = false;
+                egui::ComboBox::from_id_salt("scan_method")
+                    .selected_text(scan_method_name(self.scan_method))
+                    .show_ui(ui, |ui| {
+                        method_changed |= ui
+                            .selectable_value(&mut self.scan_method, ScanMethod::Resolver, "Resolver")
+                            .changed();
+                        method_changed |= ui
+                            .selectable_value(
+                                &mut self.scan_method,
+                                ScanMethod::CodeReference,
+                                "Code references",
+                            )
+                            .changed();
+                        method_changed |= ui
+                            .selectable_value(
+                                &mut self.scan_method,
+                                ScanMethod::Reflection,
+                                "Reflection",
+                            )
+                            .changed();
+                    });
+                // A scan is only meaningful for the method that produced it.
+                if method_changed {
+                    self.scan = None;
+                }
                 if ui.button("Scan IAT").clicked() {
                     self.scan_iat();
                 }
