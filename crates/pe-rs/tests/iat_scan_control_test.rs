@@ -73,23 +73,45 @@ fn control_text(arch: Arch, image_base: u64, slots: &[u32]) -> Vec<u8> {
     data
 }
 
-/// Build the controlled "test DLL" for `arch`: a two-section PE (`.text` code
-/// referencing a known `.idata` IAT) with a valid header set for the arch.
+/// Build the controlled "test DLL" for `arch` in its "structure intact" shape:
+/// a two-section PE (`.text` code referencing a known `.idata` IAT) with a
+/// single contiguous IAT run and the IAT data directory present — i.e. a
+/// compressor / plain unpacked binary, where the table is locatable through
+/// the PE structure.
 fn control_doc(arch: Arch) -> PeDocument {
+    let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
+    let slots: Vec<u32> = (0..6)
+        .map(|i| IDATA_RVA + IAT_OFFSET_IN_IDATA as u32 + i * psize)
+        .collect();
+    control_doc_with(arch, &slots, false)
+}
+
+/// Build the controlled "test DLL" for `arch` with the given IAT slot RVAs.
+///
+/// `slots` may be contiguous (a normal IAT) or scattered across the data
+/// section — the shape a protector leaves when it splits the IAT. With
+/// `erase_iat_dir`, `DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT]` is left zeroed
+/// and no import descriptors exist, the shape a protector leaves when it
+/// clears the import table: the IAT then exists only as the code references
+/// that dereference it.
+fn control_doc_with(arch: Arch, slots: &[u32], erase_iat_dir: bool) -> PeDocument {
     let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
     let image_base: u64 = if arch == Arch::Bit64 {
         IMAGE_BASE64
     } else {
         IMAGE_BASE32 as u64
     };
-    let slots: Vec<u32> = (0..6)
-        .map(|i| IDATA_RVA + IAT_OFFSET_IN_IDATA as u32 + i * psize)
-        .collect();
-    let text_data = control_text(arch, image_base, &slots);
+    let text_data = control_text(arch, image_base, slots);
     let text_len = text_data.len();
 
-    // `.idata`: the IAT pointer array at the known offset.
-    let mut idata_data = vec![0u8; 0x100];
+    // `.idata`: the IAT pointer array, sized to hold every slot — a scattered
+    // set therefore sits at widely separated, non-contiguous addresses.
+    let idata_size = slots
+        .iter()
+        .map(|&s| (s - IDATA_RVA) as usize + psize as usize)
+        .max()
+        .unwrap_or(0x100);
+    let mut idata_data = vec![0u8; idata_size];
     for (i, &slot) in slots.iter().enumerate() {
         let v = 0x1800_0000u64 + (i as u64) * 0x100;
         let off = (slot - IDATA_RVA) as usize;
@@ -117,7 +139,7 @@ fn control_doc(arch: Arch) -> PeDocument {
             name: *b".idata\0\0",
             virtual_size: idata_data.len() as u32,
             virtual_address: Rva(IDATA_RVA),
-            size_of_raw_data: 0x200,
+            size_of_raw_data: (idata_len as u32 + 0x1FF) & !0x1FF,
             pointer_to_raw_data: RawOffset(0x400),
             characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
                 | IMAGE_SCN_MEM_READ
@@ -127,10 +149,12 @@ fn control_doc(arch: Arch) -> PeDocument {
     };
 
     let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
-    dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory {
-        rva: Rva(slots[0]),
-        size: slots.len() as u32 * psize,
-    };
+    if !erase_iat_dir {
+        dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory {
+            rva: Rva(slots[0]),
+            size: slots.len() as u32 * psize,
+        };
+    }
 
     let optional = match arch {
         Arch::Bit64 => OptionalHeader::Bit64(OptionalHeader64 {
@@ -270,4 +294,29 @@ fn control_x86_dll_references_are_recovered() {
     let bytes = serialize(&control_doc(Arch::Bit32)).expect("serialize x86 control dll");
     let re = parse(&bytes).expect("parse x86 control dll");
     assert_scan_recovers(&re, &expected);
+}
+
+/// A protector-style shape: the same six references, but the IAT slots are
+/// scattered to non-contiguous addresses (a split IAT) and the IAT data
+/// directory is erased, so the import table exists only as code references.
+fn assert_erased_split_recovers(arch: Arch) {
+    let offsets = [0x40u32, 0x80, 0x1C0, 0x200, 0x280, 0x2C0];
+    let expected: Vec<u32> = offsets.iter().map(|&o| IDATA_RVA + o).collect();
+
+    let doc = control_doc_with(arch, &expected, true);
+    assert_scan_recovers(&doc, &expected);
+    // The same content through the real writer → file → parser round-trip.
+    let bytes = serialize(&doc).expect("serialize split/erased dll");
+    let re = parse(&bytes).expect("parse split/erased dll");
+    assert_scan_recovers(&re, &expected);
+}
+
+#[test]
+fn control_erased_split_x64_iat_recovered() {
+    assert_erased_split_recovers(Arch::Bit64);
+}
+
+#[test]
+fn control_erased_split_x86_iat_recovered() {
+    assert_erased_split_recovers(Arch::Bit32);
 }
