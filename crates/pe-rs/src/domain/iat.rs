@@ -130,8 +130,10 @@ pub enum ScanMethod {
     /// Keep slots whose stored value resolves via [`crate::api::ImportResolver`].
     #[default]
     Resolver,
-    /// Heuristic x86/x64 opcode patterns (`push`/`call`) — reserved for later.
-    OpcodePattern,
+    /// Disassemble the code sections and keep slots dereferenced by a direct
+    /// memory operand (`call/jmp/mov/lea [rip+disp]` on x64, absolute
+    /// addressing on x86).
+    CodeReference,
 }
 
 /// Options controlling [`crate::api::IatScanner::scan`].
@@ -145,8 +147,8 @@ pub struct ScanOptions {
     /// Maximum consecutive zero slots allowed inside a run (the per-module
     /// NULL separators of a real IAT). Larger gaps end the run.
     pub max_null_gap: usize,
-    /// Opcode scan: require each referenced slot's content to resolve through
-    /// the [`ImportResolver`](crate::api::ImportResolver). Disable for
+    /// Code-reference scan: require each referenced slot's content to resolve
+    /// through the [`ImportResolver`](crate::api::ImportResolver). Disable for
     /// protected dumps (erased / split IAT, e.g. VMProtect) where the slot
     /// content does not resolve — the code references alone locate the IAT.
     pub validate_slots: bool,

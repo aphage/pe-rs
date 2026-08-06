@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+iced-x86 = "1.21.0"
 thiserror.workspace = true
 windows-sys = { version = "0.61.2", features = [
     "Win32_System_SystemServices",

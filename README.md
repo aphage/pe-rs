@@ -22,8 +22,9 @@ array** addition. It is the library a future GUI PE editor will be built on
 **Scylla-style, file-level**
 - `IatScanner` — locate the IAT in the image (resolver-based, with region and
   min-entries options, grouping across the per-module NULL separators of a real
-  IAT), or by `ScanMethod::OpcodePattern` (code-reference / signature scan for
-  protected dumps with `validate_slots: false`)
+  IAT), or by `ScanMethod::CodeReference` (disassembles the code sections with
+  iced-x86 and keeps slots dereferenced by direct memory operands; signature
+  scan for protected dumps with `validate_slots: false`)
 - `IatFixer::fix_iat` — resolve IAT entries to `(module, function)`, rebuild the
   import directory (descriptors + INT/IAT arrays + name strings) and optionally
   **redirect** the original IAT slots to the new thunks
@@ -85,9 +86,9 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 ## Roadmap
 
 - [x] Phase 0–5 — scaffold, outer API + domain model, mock, contract tests, real parser/writer (round-trip stable)
-- [x] Phase 6–8 — IAT scanner (resolver + opcode-pattern), IAT fixer (import table rebuild + redirect), manual IAT array
+- [x] Phase 6–8 — IAT scanner (resolver + disassembly code-reference), IAT fixer (import table rebuild + redirect), manual IAT array
 - [x] Phase 9 — Raw↔VA conversion, section table rebuild/merge
-- [x] Opcode-pattern IAT scan (`ScanMethod::OpcodePattern`)
+- [x] Disassembly-based IAT reference scan (`ScanMethod::CodeReference`, iced-x86)
 - [x] Resource / relocation / TLS directory parsing (view)
 - [x] Resource / relocation / TLS directory editing (`DirectoryEditor`)
 - [x] LoadConfig directory parsing (view, CFG fields)

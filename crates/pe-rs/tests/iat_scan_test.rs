@@ -62,13 +62,13 @@ fn scan_ignores_unresolvable_region() {
 }
 
 #[test]
-fn opcode_scan_finds_iat_via_code_references() {
+fn code_reference_scan_finds_iat_via_code_references() {
     // The mock .text contains `call [rip+disp]` / `mov rax, [rip+disp]`
     // instructions referencing the six IAT slots.
     let resolver = MockResolver::new();
     common::both(|doc| {
         let opts = ScanOptions {
-            method: ScanMethod::OpcodePattern,
+            method: ScanMethod::CodeReference,
             ..Default::default()
         };
         let scan = doc.scan(&resolver, &opts).unwrap();
@@ -79,12 +79,12 @@ fn opcode_scan_finds_iat_via_code_references() {
 }
 
 #[test]
-fn opcode_scan_respects_region_and_min_entries() {
+fn code_reference_scan_respects_region_and_min_entries() {
     let resolver = MockResolver::new();
     common::both(|doc| {
         // Restrict to the part of .text holding the references.
         let opts = ScanOptions {
-            method: ScanMethod::OpcodePattern,
+            method: ScanMethod::CodeReference,
             region: Some((Rva(MOCK_TEXT_RVA), 0x40)),
             min_entries: 6,
             ..Default::default()
@@ -95,7 +95,7 @@ fn opcode_scan_respects_region_and_min_entries() {
 
         // min_entries above the run length -> not found.
         let opts = ScanOptions {
-            method: ScanMethod::OpcodePattern,
+            method: ScanMethod::CodeReference,
             region: Some((Rva(MOCK_TEXT_RVA), 0x40)),
             min_entries: 100,
             ..Default::default()
@@ -105,12 +105,12 @@ fn opcode_scan_respects_region_and_min_entries() {
 }
 
 #[test]
-fn opcode_scan_with_no_code_references_errors() {
+fn code_reference_scan_with_no_code_references_errors() {
     let resolver = MockResolver::new();
     common::both(|doc| {
         // .idata holds no opcode references.
         let opts = ScanOptions {
-            method: ScanMethod::OpcodePattern,
+            method: ScanMethod::CodeReference,
             region: Some((Rva(MOCK_IDATA_RVA), 0x100)),
             ..Default::default()
         };
@@ -170,7 +170,7 @@ fn resolver_scan_groups_across_null_separators() {
 }
 
 #[test]
-fn opcode_scan_signature_mode_without_resolution() {
+fn code_reference_scan_signature_mode_without_resolution() {
     // A resolver that resolves nothing: the opcode scan still finds the IAT via
     // code references alone (`validate_slots = false`), for protected dumps
     // (erased / split IAT) where slot contents do not resolve.
@@ -184,7 +184,7 @@ fn opcode_scan_signature_mode_without_resolution() {
 
     common::both(|doc| {
         let opts = ScanOptions {
-            method: ScanMethod::OpcodePattern,
+            method: ScanMethod::CodeReference,
             validate_slots: false,
             ..Default::default()
         };
@@ -192,4 +192,55 @@ fn opcode_scan_signature_mode_without_resolution() {
         assert_eq!(scan.base_rva.get(), MOCK_IAT_RVA);
         assert_eq!(scan.entries.len(), 6);
     });
+}
+
+#[test]
+fn code_reference_scan_finds_non_rax_register_variants() {
+    // Instructions the old byte-pattern scanner missed (destination registers
+    // other than rax, REX.R) must still be located by the disassembler.
+    use pe_rs::domain::section::{IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ};
+    use pe_rs::domain::{RawOffset, Section, SectionHeader};
+
+    let mut doc = common::doc_via_mock();
+    // Rebuild .text (doc.sections[0]) as a mix of rip-relative memory
+    // references: `48 8B 0D` (mov rcx) and `4C 8B 05` (mov r8) are register
+    // variants that only a real disassembler recognizes.
+    let insns: [(&[u8], usize); 6] = [
+        (&[0xFF, 0x15], 6),       // call qword [rip+disp]
+        (&[0xFF, 0x25], 6),       // jmp  qword [rip+disp]
+        (&[0x48, 0x8B, 0x0D], 7), // mov rcx, qword [rip+disp]
+        (&[0x4C, 0x8B, 0x05], 7), // mov r8,  qword [rip+disp]
+        (&[0x48, 0x8D, 0x05], 7), // lea rax, qword [rip+disp]
+        (&[0x48, 0x8B, 0x05], 7), // mov rax, qword [rip+disp]
+    ];
+    let mut data = vec![0x90u8; 0x100];
+    for (i, (prefix, len)) in insns.iter().enumerate() {
+        let insn_rva = MOCK_TEXT_RVA + (i as u32) * 8;
+        let slot_rva = MOCK_IAT_RVA + (i as u32) * 8;
+        let disp = slot_rva as i64 - (insn_rva as i64 + *len as i64);
+        let off = i * 8;
+        data[off..off + prefix.len()].copy_from_slice(prefix);
+        data[off + prefix.len()..off + prefix.len() + 4]
+            .copy_from_slice(&(disp as i32).to_le_bytes());
+    }
+    doc.sections[0] = Section {
+        header: SectionHeader {
+            name: *b".text\0\0\0",
+            virtual_size: data.len() as u32,
+            virtual_address: Rva(MOCK_TEXT_RVA),
+            size_of_raw_data: 0x200,
+            pointer_to_raw_data: RawOffset(0x200),
+            characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ,
+        },
+        data,
+    };
+
+    let resolver = MockResolver::new();
+    let opts = ScanOptions {
+        method: ScanMethod::CodeReference,
+        ..Default::default()
+    };
+    let scan = doc.scan(&resolver, &opts).unwrap();
+    assert_eq!(scan.base_rva.get(), MOCK_IAT_RVA);
+    assert_eq!(scan.entries.len(), 6);
 }

@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
+use iced_x86::{Decoder, DecoderOptions, Instruction, OpKind, Register};
+
 use crate::api::resolver::ImportResolver;
+use crate::domain::section::{IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE};
 use crate::domain::types::ptr_size;
 use crate::domain::{Arch, IatEntry, IatScan, PeDocument, Rva, ScanMethod, ScanOptions};
 use crate::error::{PeError, Result};
@@ -13,10 +16,11 @@ use crate::error::{PeError, Result};
 /// - [`ScanMethod::Resolver`] walks the image (or a `region` window) slot by
 ///   slot and keeps maximal runs whose stored value resolves through
 ///   [`ImportResolver`].
-/// - [`ScanMethod::OpcodePattern`] scans code bytes for instructions that
-///   dereference a memory address (`call/jmp/mov/lea [addr]`), computes the
-///   referenced slot RVAs, validates each slot's content through the resolver,
-///   and groups the consecutive slots into runs.
+/// - [`ScanMethod::CodeReference`] disassembles the executable sections and
+///   collects every slot dereferenced by a direct memory operand
+///   (`call/jmp/mov/lea [rip+disp]` on x64, absolute addressing on x86),
+///   validates each slot's content through the resolver, and groups the
+///   consecutive slots into runs.
 pub trait IatScanner {
     fn scan(&self, resolver: &dyn ImportResolver, options: &ScanOptions) -> Result<IatScan>;
 }
@@ -25,7 +29,7 @@ impl IatScanner for PeDocument {
     fn scan(&self, resolver: &dyn ImportResolver, options: &ScanOptions) -> Result<IatScan> {
         match options.method {
             ScanMethod::Resolver => self.scan_by_resolver(resolver, options),
-            ScanMethod::OpcodePattern => self.scan_by_opcode(resolver, options),
+            ScanMethod::CodeReference => self.scan_by_code_reference(resolver, options),
         }
     }
 }
@@ -104,21 +108,34 @@ impl PeDocument {
         }
     }
 
-    fn scan_by_opcode(
+    /// Locate IAT slots referenced by code, using iced-x86 to disassemble each
+    /// executable section. Keeps the target of every instruction that
+    /// dereferences a direct memory address — a RIP/EIP-relative operand (x64)
+    /// or an absolute address (x86) — validates each slot's content through the
+    /// resolver (unless `validate_slots` is off for protected dumps), and
+    /// groups the consecutive slots into runs.
+    fn scan_by_code_reference(
         &self,
         resolver: &dyn ImportResolver,
         options: &ScanOptions,
     ) -> Result<IatScan> {
         let psize = ptr_size(self.arch);
         let image_base = self.optional.image_base();
+        let bitness = match self.arch {
+            Arch::Bit64 => 64,
+            Arch::Bit32 => 32,
+        };
         let (start, len) = self.scan_window(options)?;
         let window_end = start.get().saturating_add(len as u32);
 
-        // 1. Collect referenced slots from opcode patterns, validated by the
-        //    resolver (the slot's stored value must resolve to an import).
-        let patterns = opcode_patterns(self.arch);
+        // 1. Disassemble each code section and collect the slots referenced by
+        //    direct memory operands, validated by the resolver.
         let mut slots: HashMap<Rva, u64> = HashMap::new();
         for section in &self.sections {
+            let chars = section.header.characteristics;
+            if chars & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE) == 0 {
+                continue;
+            }
             let sec_start = section.header.virtual_address.get();
             let sec_end = sec_start.saturating_add(section.data.len() as u32);
             let lo = sec_start.max(start.get());
@@ -128,55 +145,34 @@ impl PeDocument {
             }
             let base_off = (lo - sec_start) as usize;
             let data = &section.data[base_off..base_off + (hi - lo) as usize];
-            let sec_base = section.header.virtual_address;
-
-            for pat in patterns {
-                for (i, _) in data
-                    .windows(pat.bytes.len())
-                    .enumerate()
-                    .filter(|(_, w)| *w == pat.bytes)
-                {
-                    let insn_rva = sec_base
-                        .get()
-                        .saturating_add(base_off as u32)
-                        .saturating_add(i as u32);
-                    let target = if pat.rip_relative {
-                        // x64 rip-relative: target = next instruction + disp32
-                        let disp = i32::from_le_bytes(
-                            data[i + pat.disp_off..i + pat.disp_off + 4]
-                                .try_into()
-                                .unwrap(),
-                        );
-                        let next = insn_rva as i64 + pat.insn_len as i64;
-                        let t = next + disp as i64;
-                        if t < 0 || t > u32::MAX as i64 {
-                            continue;
-                        }
-                        Rva(t as u32)
-                    } else {
-                        // x86 absolute: the field is an absolute VA
-                        let abs = u32::from_le_bytes(
-                            data[i + pat.disp_off..i + pat.disp_off + 4]
-                                .try_into()
-                                .unwrap(),
-                        ) as u64;
-                        if abs < image_base {
-                            continue;
-                        }
-                        let r = abs - image_base;
-                        if r > u32::MAX as u64 {
-                            continue;
-                        }
-                        Rva(r as u32)
-                    };
-                    if let Ok(bytes) = self.read(target, psize) {
-                        let v = read_thunk(bytes, psize);
-                        // In signature mode (`validate_slots = false`) the slot
-                        // content is not required to resolve — the code
-                        // reference itself marks the slot as IAT-like.
-                        if !options.validate_slots || resolver.resolve(v).is_some() {
-                            slots.insert(target, v);
-                        }
+            // Decode from RVA `lo` so RIP-relative targets land in RVA space.
+            let mut decoder = Decoder::with_ip(bitness, data, lo as u64, DecoderOptions::NONE);
+            while decoder.can_decode() {
+                let insn = decoder.decode();
+                let slot_rva = if insn.is_ip_rel_memory_operand() {
+                    // Target of a RIP/EIP-relative operand, already an RVA.
+                    let t = insn.ip_rel_memory_address();
+                    if t > u32::MAX as u64 {
+                        continue;
+                    }
+                    Rva(t as u32)
+                } else if is_absolute_memory_operand(&insn) {
+                    // x86 absolute addressing: the displacement is a VA.
+                    let va = insn.memory_displacement64();
+                    if va < image_base || va - image_base > u32::MAX as u64 {
+                        continue;
+                    }
+                    Rva((va - image_base) as u32)
+                } else {
+                    continue;
+                };
+                if let Ok(bytes) = self.read(slot_rva, psize) {
+                    let v = read_thunk(bytes, psize);
+                    // In signature mode (`validate_slots = false`) the slot
+                    // content is not required to resolve — the code reference
+                    // itself marks the slot as IAT-like.
+                    if !options.validate_slots || resolver.resolve(v).is_some() {
+                        slots.insert(slot_rva, v);
                     }
                 }
             }
@@ -184,7 +180,7 @@ impl PeDocument {
 
         if slots.is_empty() {
             return Err(PeError::NotFound(
-                "no IAT slot referenced by code patterns (and resolvable)".into(),
+                "no IAT slot referenced by code (and resolvable)".into(),
             ));
         }
 
@@ -283,76 +279,10 @@ fn consider(run: Run, min_entries: usize, best: &mut Option<Run>) {
     }
 }
 
-/// A code pattern that dereferences a memory address, with the byte offset of
-/// its 32-bit address field and the total instruction length.
-struct Pattern {
-    bytes: &'static [u8],
-    disp_off: usize,
-    insn_len: usize,
-    rip_relative: bool,
-}
-
-static X64_PATTERNS: [Pattern; 4] = [
-    // call/jmp qword ptr [rip+disp]
-    Pattern {
-        bytes: &[0xFF, 0x15],
-        disp_off: 2,
-        insn_len: 6,
-        rip_relative: true,
-    },
-    Pattern {
-        bytes: &[0xFF, 0x25],
-        disp_off: 2,
-        insn_len: 6,
-        rip_relative: true,
-    },
-    // mov/lea rax, [rip+disp]
-    Pattern {
-        bytes: &[0x48, 0x8B, 0x05],
-        disp_off: 3,
-        insn_len: 7,
-        rip_relative: true,
-    },
-    Pattern {
-        bytes: &[0x48, 0x8D, 0x05],
-        disp_off: 3,
-        insn_len: 7,
-        rip_relative: true,
-    },
-];
-
-static X86_PATTERNS: [Pattern; 4] = [
-    // call/jmp dword ptr [abs]
-    Pattern {
-        bytes: &[0xFF, 0x15],
-        disp_off: 2,
-        insn_len: 6,
-        rip_relative: false,
-    },
-    Pattern {
-        bytes: &[0xFF, 0x25],
-        disp_off: 2,
-        insn_len: 6,
-        rip_relative: false,
-    },
-    // mov eax, [abs]
-    Pattern {
-        bytes: &[0x8B, 0x05],
-        disp_off: 2,
-        insn_len: 6,
-        rip_relative: false,
-    },
-    Pattern {
-        bytes: &[0xA1],
-        disp_off: 1,
-        insn_len: 5,
-        rip_relative: false,
-    },
-];
-
-fn opcode_patterns(arch: Arch) -> &'static [Pattern] {
-    match arch {
-        Arch::Bit64 => &X64_PATTERNS,
-        Arch::Bit32 => &X86_PATTERNS,
-    }
+/// True when `insn` dereferences a direct absolute address — a memory operand
+/// with neither a base nor an index register (x86 `[disp32]`, `moffs`).
+fn is_absolute_memory_operand(insn: &Instruction) -> bool {
+    insn.op_kinds().any(|k| k == OpKind::Memory)
+        && insn.memory_base() == Register::None
+        && insn.memory_index() == Register::None
 }

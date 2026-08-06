@@ -91,9 +91,9 @@ pub fn document() -> PeDocument {
     let flat = flat_imports();
 
     // `.text`: a NOP sled with six instructions that reference the IAT slots,
-    // so the opcode-pattern scanner can locate the IAT from code references.
+    // so the code-reference scanner can locate the IAT from code references.
     // Even slots use `call [rip+disp]` (FF 15), odd slots `mov rax, [rip+disp]`
-    // (48 8B 05) — covering both rip-relative patterns.
+    // (48 8B 05) — covering both rip-relative forms.
     let mut text_data = vec![0x90u8; 0x100];
     for i in 0..6usize {
         let insn_rva = MOCK_TEXT_RVA + (i as u32) * 8;
