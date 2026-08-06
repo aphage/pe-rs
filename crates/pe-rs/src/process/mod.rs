@@ -28,8 +28,8 @@ use crate::io::pe::parser::{
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, TH32CS_SNAPMODULE,
-    TH32CS_SNAPMODULE32,
+    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, PROCESSENTRY32W, Process32FirstW,
+    Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::ProcessStatus::{
     EnumProcessModules, GetModuleBaseNameW, GetModuleInformation, MODULEINFO,
@@ -90,6 +90,42 @@ pub fn module_range(pid: u32) -> Result<(u64, u32)> {
         let size = entry.modBaseSize;
         CloseHandle(snapshot);
         Ok((base, size))
+    }
+}
+
+/// A running process (PID + executable name), for the GUI's process picker.
+#[derive(Debug, Clone)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+}
+
+/// List running processes via a ToolHelp snapshot. Access-denied entries are
+/// simply omitted; a failed snapshot itself is a [`PeError`].
+pub fn list_processes() -> Result<Vec<ProcessInfo>> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(PeError::Io(std::io::Error::last_os_error()));
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut out = Vec::new();
+        let mut ok = Process32FirstW(snapshot, &mut entry);
+        while ok != 0 {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            out.push(ProcessInfo {
+                pid: entry.th32ProcessID,
+                name: String::from_utf16_lossy(&entry.szExeFile[..len]),
+            });
+            ok = Process32NextW(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        Ok(out)
     }
 }
 
@@ -435,4 +471,20 @@ fn u16_at(buf: &[u8], off: usize) -> u16 {
     buf.get(off..off + 2)
         .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_processes_includes_current_process() {
+        let procs = list_processes().expect("toolhelp snapshot");
+        let me = std::process::id();
+        let mine = procs
+            .iter()
+            .find(|p| p.pid == me)
+            .expect("current process should be listed");
+        assert!(!mine.name.is_empty(), "current process has a name");
+    }
 }

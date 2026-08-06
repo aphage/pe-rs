@@ -13,7 +13,7 @@ use pe_rs::domain::{
     DataDirectoryIndex, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva, ScanOptions,
 };
 use pe_rs::io::pe::{parse, serialize};
-use pe_rs::process::{self, ProcessResolver};
+use pe_rs::process::{self, ProcessInfo, ProcessResolver};
 use std::sync::mpsc;
 
 /// Result of an async file dialog (picked path, or `None` if cancelled).
@@ -85,6 +85,10 @@ struct PeEditorApp {
     pick_rx: Option<mpsc::Receiver<PickResult>>,
     /// Pending async "save file" dialog result.
     save_rx: Option<mpsc::Receiver<PickResult>>,
+    /// Process picker state.
+    processes: Vec<ProcessInfo>,
+    process_filter: String,
+    show_process_picker: bool,
 }
 
 impl PeEditorApp {
@@ -325,6 +329,10 @@ impl eframe::App for PeEditorApp {
                 if ui.button("Dump").clicked() {
                     self.dump_process();
                 }
+                if ui.button("Select…").clicked() {
+                    self.processes = process::list_processes().unwrap_or_default();
+                    self.show_process_picker = true;
+                }
 
                 ui.separator();
                 if ui.button("Scan IAT").clicked() {
@@ -364,6 +372,54 @@ impl eframe::App for PeEditorApp {
                 });
             }
         });
+
+        // Modal-ish process picker: filter + click a row to select its PID.
+        if self.show_process_picker {
+            egui::Window::new("Select process")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(460.0)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Filter:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.process_filter)
+                                .desired_width(260.0),
+                        );
+                        if ui.button("Refresh").clicked() {
+                            self.processes = process::list_processes().unwrap_or_default();
+                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(380.0)
+                        .show(ui, |ui| {
+                            let filter = self.process_filter.trim().to_lowercase();
+                            let mut pick: Option<u32> = None;
+                            for p in &self.processes {
+                                let matches = filter.is_empty()
+                                    || p.name.to_lowercase().contains(&filter)
+                                    || p.pid.to_string().contains(&filter);
+                                if !matches {
+                                    continue;
+                                }
+                                if ui
+                                    .selectable_label(false, format!("{:<7} {}", p.pid, p.name))
+                                    .clicked()
+                                {
+                                    pick = Some(p.pid);
+                                }
+                            }
+                            if self.processes.is_empty() {
+                                ui.label("no processes");
+                            }
+                            if let Some(pid) = pick {
+                                self.pid = pid.to_string();
+                                self.show_process_picker = false;
+                            }
+                        });
+                });
+        }
     }
 }
 
