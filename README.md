@@ -22,11 +22,18 @@ array** addition. It is the library a future GUI PE editor will be built on
 **Scylla-style, file-level**
 - `IatScanner` — locate the IAT in the image (resolver-based, with region and
   min-entries options, grouping across the per-module NULL separators of a real
-  IAT), or by `ScanMethod::CodeReference` (disassembles the code sections with
+  IAT), by `ScanMethod::CodeReference` (disassembles the code sections with
   iced-x86, keeps the direct memory operands of Scylla's IAT-reference opcode
   set — call/jmp/push/mov/lea — and returns the full referenced-slot set for
   curation with `IatTable`; signature scan for protected dumps with
-  `validate_slots: false`)
+  `validate_slots: false`), or by `ScanMethod::Reflection` (dump handling when
+  the loader overwrote `OriginalFirstThunk`: collect the `FirstThunk` arrays of
+  those descriptors, or the NULL-separated sub-arrays of the IAT data directory
+  when the import directory is gone)
+- `recover_dump_imports` — recover a dumped process's import table per Scylla's
+  dump handling: descriptors with an intact `OriginalFirstThunk` keep their
+  hint/name pairs, overwritten ones are reflected (their `FirstThunk` holds
+  loaded addresses, resolved through the resolver into names)
 - `IatFixer::fix_iat` — resolve IAT entries to `(module, function)`, rebuild the
   import directory (descriptors + INT/IAT arrays + name strings) and optionally
   **redirect** the original IAT slots to the new thunks

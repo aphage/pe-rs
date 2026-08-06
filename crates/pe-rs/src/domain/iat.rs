@@ -1,5 +1,6 @@
 //! Import Address Table (IAT) scanning and fixing types.
 
+use crate::domain::import::ImportDescriptor;
 use crate::domain::types::Rva;
 
 /// One slot of an IAT: its location and the target address stored there.
@@ -136,6 +137,14 @@ pub enum ScanMethod {
     /// direct memory operand (`call/jmp/mov/lea [rip+disp]` on x64, absolute
     /// addressing on x86) that lands in a data section.
     CodeReference,
+    /// Reflect the IAT from the PE structure itself (Scylla's dump handling
+    /// for a loader-overwritten import directory): collect the `FirstThunk`
+    /// arrays of import descriptors whose `OriginalFirstThunk` is gone
+    /// (`== 0` or `== FirstThunk`), or — when the import directory is absent
+    /// but the IAT data directory remains — every entry of its NULL-separated
+    /// per-module sub-arrays. Returns the raw slots; resolve and rebuild with
+    /// [`IatFixer::fix_iat`](crate::api::IatFixer::fix_iat).
+    Reflection,
 }
 
 /// Options controlling [`crate::api::IatScanner::scan`].
@@ -211,4 +220,16 @@ pub struct RebuiltImportTable {
     /// New thunk value for each function, in descriptor order. This is the
     /// value that belongs in the (redirected) IAT slot for that function.
     pub thunk_values: Vec<u64>,
+}
+
+/// Outcome of recovering a dumped process's import table via
+/// [`PeDocument::recover_dump_imports`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DumpImportRecovery {
+    /// Recovered imports: descriptors with an intact `OriginalFirstThunk`
+    /// parsed by name, plus descriptors reflected from overwritten thunk
+    /// arrays and resolved through the resolver.
+    pub descriptors: Vec<ImportDescriptor>,
+    /// Reflected slots whose value could not be resolved to a module/function.
+    pub unresolved: Vec<IatEntry>,
 }

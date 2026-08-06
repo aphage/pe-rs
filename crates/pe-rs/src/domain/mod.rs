@@ -23,8 +23,8 @@ pub use document::PeDocument;
 pub use dos::DosHeader;
 pub use export::{ExportSymbol, ExportTable};
 pub use iat::{
-    IatEntry, IatFixOptions, IatFixReport, IatScan, IatTable, RebuiltImportTable, ScanMethod,
-    ScanOptions,
+    DumpImportRecovery, IatEntry, IatFixOptions, IatFixReport, IatScan, IatTable,
+    RebuiltImportTable, ScanMethod, ScanOptions,
 };
 pub use import::{ImportDescriptor, ImportFunction};
 pub use load_config::LoadConfigDirectory;

@@ -1,12 +1,16 @@
 //! IAT fixing (import table rebuilding, "Fix Dump").
 
+use crate::api::iat_scanner::{collect_iat_dir_entries, collect_thunk_array, u32_at};
 use crate::api::importer::ImportTableEditor;
 use crate::api::resolver::ImportResolver;
+use crate::domain::data_directory::DataDirectoryIndex;
 use crate::domain::types::ptr_size;
 use crate::domain::{
-    IatEntry, IatFixOptions, IatFixReport, IatScan, IatTable, ImportDescriptor, PeDocument,
+    DumpImportRecovery, IatEntry, IatFixOptions, IatFixReport, IatScan, IatTable, ImportDescriptor,
+    PeDocument, Rva,
 };
 use crate::error::{PeError, Result};
+use crate::io::pe::parser::{parse_thunks, read_cstring};
 
 /// Rebuilds a PE's import table from the addresses found in its IAT.
 ///
@@ -64,23 +68,8 @@ impl IatFixer for PeDocument {
         };
 
         // Group resolved entries into import descriptors, first-seen order.
-        let mut descriptors: Vec<ImportDescriptor> = Vec::new();
-        for entry in &scan.entries {
-            match resolver.resolve(entry.value) {
-                Some(ri) => match descriptors.iter_mut().find(|d| d.name == ri.module) {
-                    Some(d) => {
-                        if !d.functions.contains(&ri.function) {
-                            d.functions.push(ri.function.clone());
-                        }
-                    }
-                    None => descriptors.push(ImportDescriptor {
-                        name: ri.module.clone(),
-                        functions: vec![ri.function.clone()],
-                    }),
-                },
-                None => report.unresolved.push(*entry),
-            }
-        }
+        let (descriptors, unresolved) = group_resolved(&scan.entries, resolver);
+        report.unresolved = unresolved;
 
         if descriptors.is_empty() {
             return Err(PeError::NotFound(
@@ -129,4 +118,112 @@ impl IatFixer for PeDocument {
         };
         self.fix_iat(&scan, resolver, options)
     }
+}
+
+impl PeDocument {
+    /// Recover a dumped process's import table, following Scylla's dump
+    /// handling (docs/dump 情况分析和处理.md): import descriptors whose
+    /// `OriginalFirstThunk` the loader overwrote (`== 0` or `== FirstThunk`)
+    /// are *reflected* — their `FirstThunk` array now holds loaded addresses,
+    /// resolved here through `resolver` into `(module, function)` names —
+    /// while descriptors with an intact `OriginalFirstThunk` keep their
+    /// original hint/name pairs. When the import directory is gone but the IAT
+    /// data directory remains, its NULL-separated per-module sub-arrays are
+    /// reflected the same way. Reflected values that cannot be resolved are
+    /// reported in [`DumpImportRecovery::unresolved`].
+    pub fn recover_dump_imports(
+        &self,
+        resolver: &dyn ImportResolver,
+    ) -> Result<DumpImportRecovery> {
+        let psize = ptr_size(self.arch);
+        let mut out = DumpImportRecovery::default();
+
+        let import_dir = self
+            .data_directory(DataDirectoryIndex::Import)
+            .ok()
+            .copied();
+        if let Some(dd) = import_dir.filter(|d| d.rva != Rva::NULL) {
+            let mut i = 0u32;
+            while let Some(desc_rva) = dd.rva.checked_add(i * 20) {
+                let Ok(desc) = self.read(desc_rva, 20) else {
+                    break;
+                };
+                let oft = u32_at(desc, 0);
+                let name_rva = u32_at(desc, 12);
+                let ft = u32_at(desc, 16);
+                if oft == 0 && name_rva == 0 && ft == 0 {
+                    break; // terminator descriptor
+                }
+                if oft == 0 && ft == 0 {
+                    break; // FirstThunk destroyed (Scylla logs an error, exits)
+                }
+                if oft == 0 || oft == ft {
+                    // OriginalFirstThunk was used as the IAT: reflect the loaded
+                    // addresses in FirstThunk.
+                    let mut entries = Vec::new();
+                    collect_thunk_array(self, Rva(ft), psize, &mut entries);
+                    let (mut descs, mut unresolved) = group_resolved(&entries, resolver);
+                    out.descriptors.append(&mut descs);
+                    out.unresolved.append(&mut unresolved);
+                } else {
+                    // OriginalFirstThunk intact: parse hint/name pairs as usual.
+                    let name = read_cstring(self, Rva(name_rva))?;
+                    let functions = parse_thunks(self, Rva(oft), psize)?;
+                    out.descriptors.push(ImportDescriptor { name, functions });
+                }
+                i += 1;
+            }
+        } else if let Some(dd) = self
+            .data_directory(DataDirectoryIndex::Iat)
+            .ok()
+            .copied()
+            .filter(|d| d.rva != Rva::NULL)
+        {
+            // Import directory gone but the IAT directory remains: reflect
+            // every NULL-separated sub-array.
+            let mut entries = Vec::new();
+            collect_iat_dir_entries(self, dd, psize, &mut entries);
+            let (mut descs, mut unresolved) = group_resolved(&entries, resolver);
+            out.descriptors.append(&mut descs);
+            out.unresolved.append(&mut unresolved);
+        } else {
+            return Err(PeError::NotFound(
+                "no import or IAT data directory to recover imports from".into(),
+            ));
+        }
+
+        if out.descriptors.is_empty() && out.unresolved.is_empty() {
+            return Err(PeError::NotFound(
+                "no import table could be recovered from the dump".into(),
+            ));
+        }
+        Ok(out)
+    }
+}
+
+/// Resolve raw IAT slots into per-module import descriptors, returning the
+/// descriptors plus the slots that could not be resolved.
+fn group_resolved(
+    entries: &[IatEntry],
+    resolver: &dyn ImportResolver,
+) -> (Vec<ImportDescriptor>, Vec<IatEntry>) {
+    let mut descriptors: Vec<ImportDescriptor> = Vec::new();
+    let mut unresolved = Vec::new();
+    for entry in entries {
+        match resolver.resolve(entry.value) {
+            Some(ri) => match descriptors.iter_mut().find(|d| d.name == ri.module) {
+                Some(d) => {
+                    if !d.functions.contains(&ri.function) {
+                        d.functions.push(ri.function.clone());
+                    }
+                }
+                None => descriptors.push(ImportDescriptor {
+                    name: ri.module.clone(),
+                    functions: vec![ri.function.clone()],
+                }),
+            },
+            None => unresolved.push(*entry),
+        }
+    }
+    (descriptors, unresolved)
 }

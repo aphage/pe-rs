@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use iced_x86::{Decoder, DecoderOptions, Instruction, OpKind, Register};
 
 use crate::api::resolver::ImportResolver;
+use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
 use crate::domain::section::{IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE};
 use crate::domain::types::ptr_size;
 use crate::domain::{Arch, IatEntry, IatScan, PeDocument, Rva, ScanMethod, ScanOptions};
@@ -30,6 +31,7 @@ impl IatScanner for PeDocument {
         match options.method {
             ScanMethod::Resolver => self.scan_by_resolver(resolver, options),
             ScanMethod::CodeReference => self.scan_by_code_reference(resolver, options),
+            ScanMethod::Reflection => self.scan_by_reflection(resolver, options),
         }
     }
 }
@@ -217,6 +219,81 @@ impl PeDocument {
         })
     }
 
+    /// Reflect the IAT from the PE structure itself, following Scylla's dump
+    /// handling (docs/dump 情况分析和处理.md): when the loader has overwritten
+    /// an import descriptor's `OriginalFirstThunk` (`== 0` or `== FirstThunk`),
+    /// the `FirstThunk` array now holds loaded *addresses* and *is* the IAT —
+    /// collect its slots. If the import directory is gone but the IAT data
+    /// directory remains, walk its NULL-separated per-module sub-arrays (a
+    /// double NULL closes the whole table). The reflected slots are returned
+    /// unresolved; feed them to `IatFixer::fix_iat` to resolve and rebuild.
+    fn scan_by_reflection(
+        &self,
+        _resolver: &dyn ImportResolver,
+        _options: &ScanOptions,
+    ) -> Result<IatScan> {
+        let psize = ptr_size(self.arch);
+
+        // 1. An intact import directory: reflect the descriptors whose
+        //    OriginalFirstThunk the loader overwrote.
+        if let Some(dd) = self.non_null_dir(DataDirectoryIndex::Import) {
+            let mut entries = Vec::new();
+            let mut i = 0u32;
+            while let Some(desc_rva) = dd.rva.checked_add(i * 20) {
+                let Ok(desc) = self.read(desc_rva, 20) else {
+                    break;
+                };
+                let oft = u32_at(desc, 0);
+                let name_rva = u32_at(desc, 12);
+                let ft = u32_at(desc, 16);
+                // A NULL descriptor terminates the array.
+                if oft == 0 && name_rva == 0 && ft == 0 {
+                    break;
+                }
+                // OriginalFirstThunk destroyed *and* FirstThunk destroyed:
+                // nothing to reflect — Scylla logs an error and exits.
+                if oft == 0 && ft == 0 {
+                    break;
+                }
+                if (oft == 0 || oft == ft) && ft != 0 {
+                    collect_thunk_array(self, Rva(ft), psize, &mut entries);
+                }
+                i += 1;
+            }
+            if !entries.is_empty() {
+                return Ok(entries_to_scan(entries));
+            }
+            return Err(PeError::NotFound(
+                "no import descriptor with an overwritten OriginalFirstThunk to reflect".into(),
+            ));
+        }
+
+        // 2. Import directory gone, but the IAT data directory remains: walk
+        //    its NULL-separated per-module sub-arrays.
+        if let Some(dd) = self.non_null_dir(DataDirectoryIndex::Iat) {
+            let mut entries = Vec::new();
+            collect_iat_dir_entries(self, dd, psize, &mut entries);
+            if !entries.is_empty() {
+                return Ok(entries_to_scan(entries));
+            }
+            return Err(PeError::NotFound(
+                "no non-empty IAT sub-array in the IAT data directory".into(),
+            ));
+        }
+
+        Err(PeError::NotFound(
+            "neither an import directory nor an IAT data directory to reflect".into(),
+        ))
+    }
+
+    /// The data directory `idx` when present (its RVA is non-zero).
+    fn non_null_dir(&self, idx: DataDirectoryIndex) -> Option<DataDirectory> {
+        self.data_directory(idx)
+            .ok()
+            .copied()
+            .filter(|d| d.rva != Rva::NULL)
+    }
+
     /// Whether `rva` falls inside a non-executable section — a plausible data
     /// location for an IAT slot.
     fn slot_in_data(&self, rva: Rva) -> bool {
@@ -264,6 +341,90 @@ fn consider(run: Run, min_entries: usize, best: &mut Option<Run>) {
             .is_none_or(|b| run.entries.len() > b.entries.len())
     {
         *best = Some(run);
+    }
+}
+
+/// Read a `u32` from `bytes` at `off`, or 0 when out of bounds.
+pub(crate) fn u32_at(bytes: &[u8], off: usize) -> u32 {
+    bytes
+        .get(off..off + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .unwrap_or(0)
+}
+
+/// Collect the non-zero thunk slots of the `[IMAGE_THUNK_DATA, NULL]` array at
+/// `ft_rva` into `out`. Shared by the reflection scan and dump-import recovery.
+pub(crate) fn collect_thunk_array(
+    doc: &PeDocument,
+    ft_rva: Rva,
+    psize: usize,
+    out: &mut Vec<IatEntry>,
+) {
+    let mut off = 0u32;
+    while let Some(rva) = ft_rva.checked_add(off) {
+        let Ok(bytes) = doc.read(rva, psize) else {
+            break;
+        };
+        let v = read_thunk(bytes, psize);
+        if v == 0 {
+            break;
+        }
+        out.push(IatEntry { rva, value: v });
+        off += psize as u32;
+    }
+}
+
+/// Collect every entry of the IAT data directory `dd`, walked as NULL-separated
+/// per-module sub-arrays: a NULL closes a sub-array, a second NULL closes the
+/// whole table, and the directory `size` bounds the walk.
+pub(crate) fn collect_iat_dir_entries(
+    doc: &PeDocument,
+    dd: DataDirectory,
+    psize: usize,
+    out: &mut Vec<IatEntry>,
+) {
+    let end = dd.size.min(u32::MAX - dd.rva.get());
+    let mut off = 0u32;
+    while off < end {
+        let Some(slot_rva) = dd.rva.checked_add(off) else {
+            break;
+        };
+        let Ok(bytes) = doc.read(slot_rva, psize) else {
+            break;
+        };
+        let v = read_thunk(bytes, psize);
+        if v == 0 {
+            // NULL closes a sub-array; a second NULL closes the whole table.
+            off += psize as u32;
+            if off >= end {
+                break;
+            }
+            let Some(next_rva) = dd.rva.checked_add(off) else {
+                break;
+            };
+            let Ok(next) = doc.read(next_rva, psize) else {
+                break;
+            };
+            if read_thunk(next, psize) == 0 {
+                break;
+            }
+            continue;
+        }
+        out.push(IatEntry {
+            rva: slot_rva,
+            value: v,
+        });
+        off += psize as u32;
+    }
+}
+
+/// Sort the reflected entries by RVA and wrap them in an [`IatScan`].
+fn entries_to_scan(mut entries: Vec<IatEntry>) -> IatScan {
+    entries.sort_by_key(|e| e.rva);
+    IatScan {
+        base_rva: entries[0].rva,
+        size: entries.len(),
+        entries,
     }
 }
 

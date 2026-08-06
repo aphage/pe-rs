@@ -5,7 +5,7 @@
 //! must recover *exactly* the referenced slots, in order, on both
 //! architectures, after a real serialize → parse file round-trip.
 
-use pe_rs::api::IatScanner;
+use pe_rs::api::{IatScanner, ImportResolver, ResolvedImport};
 use pe_rs::domain::coff::IMAGE_FILE_EXECUTABLE_IMAGE;
 use pe_rs::domain::data_directory::{DataDirectory, DataDirectoryIndex};
 use pe_rs::domain::dos::{DOS_MAGIC, DosHeader};
@@ -17,7 +17,7 @@ use pe_rs::domain::section::{
     IMAGE_SCN_MEM_WRITE, Section, SectionHeader,
 };
 use pe_rs::domain::{
-    Arch, CoffHeader, Machine, PeDocument, RawOffset, Rva, ScanMethod, ScanOptions,
+    Arch, CoffHeader, ImportFunction, Machine, PeDocument, RawOffset, Rva, ScanMethod, ScanOptions,
 };
 use pe_rs::io::pe::{parse, serialize};
 
@@ -33,6 +33,22 @@ struct NoResolver;
 impl pe_rs::api::ImportResolver for NoResolver {
     fn resolve(&self, _address: u64) -> Option<pe_rs::api::ResolvedImport> {
         None
+    }
+}
+
+/// Resolves the control DLL's slot values (`0x1800_0000 + i * 0x100`, the
+/// addresses `control_doc_with` writes into its IAT) to `control.dll!fn<i>`.
+struct ControlResolver;
+impl ImportResolver for ControlResolver {
+    fn resolve(&self, address: u64) -> Option<ResolvedImport> {
+        if address < 0x1800_0000 {
+            return None;
+        }
+        let i = (address - 0x1800_0000) / 0x100;
+        Some(ResolvedImport {
+            module: "control.dll".to_string(),
+            function: ImportFunction::by_name(format!("fn{i}")),
+        })
     }
 }
 
@@ -102,7 +118,6 @@ fn control_doc_with(arch: Arch, slots: &[u32], erase_iat_dir: bool) -> PeDocumen
         IMAGE_BASE32 as u64
     };
     let text_data = control_text(arch, image_base, slots);
-    let text_len = text_data.len();
 
     // `.idata`: the IAT pointer array, sized to hold every slot — a scattered
     // set therefore sits at widely separated, non-contiguous addresses.
@@ -121,32 +136,9 @@ fn control_doc_with(arch: Arch, slots: &[u32], erase_iat_dir: bool) -> PeDocumen
             idata_data[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
         }
     }
-    let idata_len = idata_data.len();
 
-    let text = Section {
-        header: SectionHeader {
-            name: *b".text\0\0\0",
-            virtual_size: text_data.len() as u32,
-            virtual_address: Rva(TEXT_RVA),
-            size_of_raw_data: 0x200,
-            pointer_to_raw_data: RawOffset(0x200),
-            characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ,
-        },
-        data: text_data,
-    };
-    let idata = Section {
-        header: SectionHeader {
-            name: *b".idata\0\0",
-            virtual_size: idata_data.len() as u32,
-            virtual_address: Rva(IDATA_RVA),
-            size_of_raw_data: (idata_len as u32 + 0x1FF) & !0x1FF,
-            pointer_to_raw_data: RawOffset(0x400),
-            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
-                | IMAGE_SCN_MEM_READ
-                | IMAGE_SCN_MEM_WRITE,
-        },
-        data: idata_data,
-    };
+    let text = section_text(text_data);
+    let idata = section_idata(idata_data);
 
     let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
     if !erase_iat_dir {
@@ -156,13 +148,22 @@ fn control_doc_with(arch: Arch, slots: &[u32], erase_iat_dir: bool) -> PeDocumen
         };
     }
 
+    doc_shell(arch, text, idata, dirs)
+}
+
+/// Wrap the two test sections in a valid two-section PE document with headers
+/// for `arch`. `.text` must be a code section at `TEXT_RVA`, `.idata` a data
+/// section at `IDATA_RVA`; the optional-header sizes derive from them.
+fn doc_shell(arch: Arch, text: Section, idata: Section, dirs: Vec<DataDirectory>) -> PeDocument {
+    let text_len = text.data.len() as u32;
+    let idata_len = idata.data.len() as u32;
     let optional = match arch {
         Arch::Bit64 => OptionalHeader::Bit64(OptionalHeader64 {
             magic: PE32_PLUS_MAGIC,
             major_linker_version: 14,
             minor_linker_version: 0,
-            size_of_code: text_len as u32,
-            size_of_initialized_data: idata_len as u32,
+            size_of_code: text_len,
+            size_of_initialized_data: idata_len,
             size_of_uninitialized_data: 0,
             address_of_entry_point: Rva(TEXT_RVA),
             base_of_code: Rva(TEXT_RVA),
@@ -192,8 +193,8 @@ fn control_doc_with(arch: Arch, slots: &[u32], erase_iat_dir: bool) -> PeDocumen
             magic: PE32_MAGIC,
             major_linker_version: 14,
             minor_linker_version: 0,
-            size_of_code: text_len as u32,
-            size_of_initialized_data: idata_len as u32,
+            size_of_code: text_len,
+            size_of_initialized_data: idata_len,
             size_of_uninitialized_data: 0,
             address_of_entry_point: Rva(TEXT_RVA),
             base_of_code: Rva(TEXT_RVA),
@@ -254,18 +255,60 @@ fn control_doc_with(arch: Arch, slots: &[u32], erase_iat_dir: bool) -> PeDocumen
     }
 }
 
-/// The scan must recover exactly `expected` slots, in order, from `doc`.
-fn assert_scan_recovers(doc: &PeDocument, expected: &[u32]) {
+/// A `.text` code section at `TEXT_RVA` holding `data`.
+fn section_text(data: Vec<u8>) -> Section {
+    Section {
+        header: SectionHeader {
+            name: *b".text\0\0\0",
+            virtual_size: data.len() as u32,
+            virtual_address: Rva(TEXT_RVA),
+            size_of_raw_data: 0x200,
+            pointer_to_raw_data: RawOffset(0x200),
+            characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ,
+        },
+        data,
+    }
+}
+
+/// A `.idata` data section at `IDATA_RVA` holding `data`.
+fn section_idata(data: Vec<u8>) -> Section {
+    Section {
+        header: SectionHeader {
+            name: *b".idata\0\0",
+            virtual_size: data.len() as u32,
+            virtual_address: Rva(IDATA_RVA),
+            size_of_raw_data: (data.len() as u32 + 0x1FF) & !0x1FF,
+            pointer_to_raw_data: RawOffset(0x400),
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
+                | IMAGE_SCN_MEM_READ
+                | IMAGE_SCN_MEM_WRITE,
+        },
+        data,
+    }
+}
+
+/// Write a little-endian `u32` into `buf` at `off`.
+fn u32_w(buf: &mut [u8], off: usize, v: u32) {
+    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// The scan with `method` must recover exactly `expected` slots, in order.
+fn assert_scan_recovers_with(doc: &PeDocument, expected: &[u32], method: ScanMethod) {
     let opts = ScanOptions {
-        method: ScanMethod::CodeReference,
+        method,
         validate_slots: false,
         ..Default::default()
     };
     let scan = doc
         .scan(&NoResolver, &opts)
-        .expect("code-reference scan should find the referenced slots");
+        .unwrap_or_else(|e| panic!("{method:?} scan should find the referenced slots: {e}"));
     let got: Vec<u32> = scan.entries.iter().map(|e| e.rva.get()).collect();
     assert_eq!(got, expected, "recovered IAT slots");
+}
+
+/// The code-reference scan must recover exactly `expected` slots, in order.
+fn assert_scan_recovers(doc: &PeDocument, expected: &[u32]) {
+    assert_scan_recovers_with(doc, expected, ScanMethod::CodeReference);
 }
 
 #[test]
@@ -319,4 +362,150 @@ fn control_erased_split_x64_iat_recovered() {
 #[test]
 fn control_erased_split_x86_iat_recovered() {
     assert_erased_split_recovers(Arch::Bit32);
+}
+
+// ---------------------------------------------------------------------------
+// Reflection shapes (docs/dump 情况分析和处理.md, the "相对正常的导入表"
+// branches): a dumped PE whose import directory the loader overwrote.
+
+/// The reflection scan must recover exactly `expected` slots, in order.
+fn assert_reflection_recovers(doc: &PeDocument, expected: &[u32]) {
+    assert_scan_recovers_with(doc, expected, ScanMethod::Reflection);
+}
+
+/// The control DLL slot RVAs for `reflect_1b_doc`: two NULL-separated
+/// sub-arrays of two slots each.
+fn reflect_1b_slots(arch: Arch) -> Vec<u32> {
+    let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
+    let iat_off = IAT_OFFSET_IN_IDATA as u32;
+    [0u32, 1, 3, 4]
+        .iter()
+        .map(|&i| IDATA_RVA + iat_off + i * psize)
+        .collect()
+}
+
+/// A dump whose import directory survives but whose descriptor's
+/// `OriginalFirstThunk` was overwritten by the loader (`== 0`): the
+/// `FirstThunk` array now holds loaded addresses and *is* the IAT.
+fn reflect_1a_doc(arch: Arch) -> PeDocument {
+    let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
+    let image_base: u64 = if arch == Arch::Bit64 {
+        IMAGE_BASE64
+    } else {
+        IMAGE_BASE32 as u64
+    };
+    let ft_off = IAT_OFFSET_IN_IDATA as u32;
+    let slots: Vec<u32> = (0..3).map(|i| IDATA_RVA + ft_off + i * psize).collect();
+    let text_data = control_text(arch, image_base, &slots);
+
+    // `.idata`: import descriptors + DLL name + the FirstThunk/IAT array.
+    let mut idata_data = vec![0u8; 0x100];
+    // descriptor[0]: OriginalFirstThunk == 0 (overwritten, stays zero),
+    // Name = name_rva, FirstThunk = ft_rva; descriptor[1] is the all-zero
+    // terminator.
+    u32_w(&mut idata_data, 12, IDATA_RVA + 0x40); // Name
+    u32_w(&mut idata_data, 16, slots[0]); // FirstThunk
+    idata_data[0x40..0x4C].copy_from_slice(b"control.dll\0");
+    for (i, &slot) in slots.iter().enumerate() {
+        let v = 0x1800_0000u64 + (i as u64) * 0x100;
+        let off = (slot - IDATA_RVA) as usize;
+        if psize == 8 {
+            idata_data[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        } else {
+            idata_data[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
+        }
+    }
+
+    let text = section_text(text_data);
+    let idata = section_idata(idata_data);
+
+    let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
+    dirs[DataDirectoryIndex::Import.to_usize()] = DataDirectory {
+        rva: Rva(IDATA_RVA),
+        size: 0x40,
+    };
+
+    doc_shell(arch, text, idata, dirs)
+}
+
+/// A dump whose import directory is gone but whose IAT data directory survives
+/// as NULL-separated per-module sub-arrays (the doc's Case B): two sub-arrays
+/// of two slots, closed by the whole-table terminator double NULL.
+fn reflect_1b_doc(arch: Arch) -> PeDocument {
+    let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
+    let image_base: u64 = if arch == Arch::Bit64 {
+        IMAGE_BASE64
+    } else {
+        IMAGE_BASE32 as u64
+    };
+    let slots = reflect_1b_slots(arch);
+    let text_data = control_text(arch, image_base, &slots);
+
+    // `.idata`: [v0, v1, NULL, v2, v3, NULL, NULL] at the IAT offset — the
+    // single NULLs and the final double NULL are the zero-initialized gaps.
+    let mut idata_data = vec![0u8; 0x100];
+    for (i, &slot) in slots.iter().enumerate() {
+        let v = 0x1800_0000u64 + (i as u64) * 0x100;
+        let off = (slot - IDATA_RVA) as usize;
+        if psize == 8 {
+            idata_data[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        } else {
+            idata_data[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
+        }
+    }
+
+    let text = section_text(text_data);
+    let idata = section_idata(idata_data);
+
+    let mut dirs = vec![DataDirectory::default(); DataDirectoryIndex::COUNT];
+    dirs[DataDirectoryIndex::Iat.to_usize()] = DataDirectory {
+        rva: Rva(IDATA_RVA + IAT_OFFSET_IN_IDATA as u32),
+        size: 7 * psize,
+    };
+
+    doc_shell(arch, text, idata, dirs)
+}
+
+#[test]
+fn reflection_recovers_overwritten_oft_thunks() {
+    for arch in [Arch::Bit64, Arch::Bit32] {
+        let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
+        let expected: Vec<u32> = (0..3)
+            .map(|i| IDATA_RVA + IAT_OFFSET_IN_IDATA as u32 + i * psize)
+            .collect();
+        assert_reflection_recovers(&reflect_1a_doc(arch), &expected);
+    }
+}
+
+#[test]
+fn reflection_recovers_iat_dir_sub_arrays() {
+    for arch in [Arch::Bit64, Arch::Bit32] {
+        let doc = reflect_1b_doc(arch);
+        assert_reflection_recovers(&doc, &reflect_1b_slots(arch));
+    }
+}
+
+#[test]
+fn recover_dump_imports_reflects_overwritten_oft() {
+    for arch in [Arch::Bit64, Arch::Bit32] {
+        let rec = reflect_1a_doc(arch)
+            .recover_dump_imports(&ControlResolver)
+            .expect("recover imports");
+        assert_eq!(rec.descriptors.len(), 1, "{arch:?}");
+        assert_eq!(rec.descriptors[0].name, "control.dll");
+        assert_eq!(rec.descriptors[0].functions.len(), 3);
+        assert!(rec.unresolved.is_empty(), "{arch:?}");
+    }
+}
+
+#[test]
+fn recover_dump_imports_reflects_iat_sub_arrays() {
+    for arch in [Arch::Bit64, Arch::Bit32] {
+        let rec = reflect_1b_doc(arch)
+            .recover_dump_imports(&ControlResolver)
+            .expect("recover imports");
+        assert_eq!(rec.descriptors.len(), 1, "{arch:?}");
+        assert_eq!(rec.descriptors[0].functions.len(), 4);
+        assert!(rec.unresolved.is_empty(), "{arch:?}");
+    }
 }

@@ -380,7 +380,11 @@ pub(crate) fn parse_imports_from_doc(
     Ok(out)
 }
 
-fn parse_thunks(doc: &PeDocument, thunk_rva: Rva, psize: usize) -> Result<Vec<ImportFunction>> {
+pub(crate) fn parse_thunks(
+    doc: &PeDocument,
+    thunk_rva: Rva,
+    psize: usize,
+) -> Result<Vec<ImportFunction>> {
     let mut out = Vec::new();
     let mut i: usize = 0;
     let high_bit = 1u64 << (psize * 8 - 1);
@@ -502,7 +506,7 @@ pub(crate) fn parse_exports_from_doc(
     }))
 }
 
-fn read_cstring(doc: &PeDocument, rva: Rva) -> Result<String> {
+pub(crate) fn read_cstring(doc: &PeDocument, rva: Rva) -> Result<String> {
     let mut out = Vec::new();
     for i in 0..4096u32 {
         let byte = doc.read(
