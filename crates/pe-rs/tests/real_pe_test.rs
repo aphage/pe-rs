@@ -163,8 +163,9 @@ fn known_iat_slots(doc: &PeDocument) -> Vec<u32> {
 }
 
 /// Run the disassembly code-reference scan on a real document and check it
-/// recovers actual IAT slots: the run is substantial, pointer-aligned, lands
-/// in data (not code) sections, and mostly overlaps the known IAT arrays.
+/// recovers actual IAT slots: the reference set is substantial, pointer-
+/// aligned, lands in data (not code) sections, mostly overlaps the real IAT
+/// arrays, and covers most of them.
 fn verify_code_reference_scan(doc: &PeDocument, known: &[u32], path: &str) {
     use std::collections::HashSet;
 
@@ -179,7 +180,7 @@ fn verify_code_reference_scan(doc: &PeDocument, known: &[u32], path: &str) {
         .unwrap_or_else(|e| panic!("scan {path}: {e}"));
     assert!(
         scan.entries.len() >= 20,
-        "expected a substantial IAT run in {path}, got {}",
+        "expected a substantial IAT reference set in {path}, got {}",
         scan.entries.len()
     );
 
@@ -207,21 +208,35 @@ fn verify_code_reference_scan(doc: &PeDocument, known: &[u32], path: &str) {
     }
 
     let known_set: HashSet<u32> = known.iter().copied().collect();
-    let hits = scan
+    let in_iat = scan
         .entries
         .iter()
         .filter(|e| known_set.contains(&e.rva.get()))
         .count();
-    let ratio = hits as f64 / scan.entries.len() as f64;
-    let pct = ratio * 100.0;
+    let precision = in_iat as f64 / scan.entries.len() as f64;
+    let recall = known
+        .iter()
+        .filter(|r| scan.entries.iter().any(|e| e.rva.get() == **r))
+        .count() as f64
+        / known.len() as f64;
+
     eprintln!(
-        "{path}: {hits}/{} run entries ({pct:.0}%) fall in the real IAT",
-        scan.entries.len()
+        "{path}: {in_iat}/{} referenced slots in the real IAT ({:.0}% precision), {:.0}% of the real IAT covered",
+        scan.entries.len(),
+        precision * 100.0,
+        recall * 100.0,
     );
     assert!(
-        ratio >= 0.5,
-        "{path}: only {hits}/{} ({pct:.0}%) run entries fall in the real IAT",
-        scan.entries.len()
+        recall >= 0.6,
+        "{path}: only {:.0}% of the real IAT is covered by the references",
+        recall * 100.0
+    );
+    // Precision is inherently variable for the full reference-set model (large
+    // DLLs carry many aligned global-data references); keep a low sanity floor.
+    assert!(
+        precision >= 0.1,
+        "{path}: only {:.0}% of referenced slots are real IAT slots",
+        precision * 100.0
     );
 }
 

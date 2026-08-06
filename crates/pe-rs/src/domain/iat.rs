@@ -11,7 +11,9 @@ pub struct IatEntry {
     pub value: u64,
 }
 
-/// The result of scanning for an IAT: a contiguous run of entries.
+/// The result of scanning for an IAT. For the [`ScanMethod::Resolver`] scan
+/// this is one contiguous run; for [`ScanMethod::CodeReference`] it is the
+/// full referenced-slot set (possibly spanning several segments).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IatScan {
     /// RVA of the first entry.
@@ -130,9 +132,9 @@ pub enum ScanMethod {
     /// Keep slots whose stored value resolves via [`crate::api::ImportResolver`].
     #[default]
     Resolver,
-    /// Disassemble the code sections and keep slots dereferenced by a direct
-    /// memory operand (`call/jmp/mov/lea [rip+disp]` on x64, absolute
-    /// addressing on x86).
+    /// Disassemble the code sections and return every slot dereferenced by a
+    /// direct memory operand (`call/jmp/mov/lea [rip+disp]` on x64, absolute
+    /// addressing on x86) that lands in a data section.
     CodeReference,
 }
 
@@ -144,8 +146,8 @@ pub struct ScanOptions {
     pub method: ScanMethod,
     /// Minimum number of consecutive valid entries a candidate must have.
     pub min_entries: usize,
-    /// Maximum consecutive zero slots allowed inside a run (the per-module
-    /// NULL separators of a real IAT). Larger gaps end the run.
+    /// Resolver scan: maximum consecutive zero slots allowed inside a run (the
+    /// per-module NULL separators of a real IAT). Larger gaps end the run.
     pub max_null_gap: usize,
     /// Code-reference scan: require each referenced slot's content to resolve
     /// through the [`ImportResolver`](crate::api::ImportResolver). Disable for

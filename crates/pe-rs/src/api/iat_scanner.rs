@@ -19,8 +19,8 @@ use crate::error::{PeError, Result};
 /// - [`ScanMethod::CodeReference`] disassembles the executable sections and
 ///   collects every slot dereferenced by a direct memory operand
 ///   (`call/jmp/mov/lea [rip+disp]` on x64, absolute addressing on x86),
-///   validates each slot's content through the resolver, and groups the
-///   consecutive slots into runs.
+///   validates each slot's content through the resolver, and returns the full
+///   referenced-slot set (Scylla's reference-scan model).
 pub trait IatScanner {
     fn scan(&self, resolver: &dyn ImportResolver, options: &ScanOptions) -> Result<IatScan>;
 }
@@ -112,8 +112,9 @@ impl PeDocument {
     /// executable section. Keeps the target of every instruction that
     /// dereferences a direct memory address — a RIP/EIP-relative operand (x64)
     /// or an absolute address (x86) — validates each slot's content through the
-    /// resolver (unless `validate_slots` is off for protected dumps), and
-    /// groups the consecutive slots into runs.
+    /// resolver (unless `validate_slots` is off for protected dumps). The full
+    /// set of referenced slots is returned; it may span several segments (e.g.
+    /// normal + delay-load thunks), so curate with `IatTable` when rebuilding.
     fn scan_by_code_reference(
         &self,
         resolver: &dyn ImportResolver,
@@ -166,6 +167,12 @@ impl PeDocument {
                 } else {
                     continue;
                 };
+                // An IAT slot is pointer-aligned and never lives in code:
+                // drop unaligned references (data / struct fields) and
+                // references into executable sections.
+                if slot_rva.get() % psize as u32 != 0 || !self.slot_in_data(slot_rva) {
+                    continue;
+                }
                 if let Ok(bytes) = self.read(slot_rva, psize) {
                     let v = read_thunk(bytes, psize);
                     // In signature mode (`validate_slots = false`) the slot
@@ -184,60 +191,38 @@ impl PeDocument {
             ));
         }
 
-        // 2. Sort the unique slots and group runs: a slot continues a run when
-        //    it is within `max_null_gap + 1` pointer widths of the previous
-        //    referenced slot, so split IAT chunks still merge.
-        let mut ordered: Vec<Rva> = slots.keys().copied().collect();
-        ordered.sort_unstable();
-        let max_span = psize as u32 * (options.max_null_gap as u32 + 1);
-        let mut current: Option<Run> = None;
-        let mut best: Option<Run> = None;
-        for &rva in &ordered {
-            let is_next = current.as_ref().is_none_or(|r| {
-                let last = r
-                    .entries
-                    .last()
-                    .map(|e| e.rva.get())
-                    .unwrap_or(r.base.get());
-                rva.get() > last && rva.get() - last <= max_span
-            });
-            if is_next {
-                let run = current.get_or_insert_with(|| Run {
-                    base: rva,
-                    entries: Vec::new(),
-                });
-                run.entries.push(IatEntry {
-                    rva,
-                    value: slots[&rva],
-                });
-            } else {
-                if let Some(run) = current.take() {
-                    consider(run, options.min_entries, &mut best);
-                }
-                current = Some(Run {
-                    base: rva,
-                    entries: vec![IatEntry {
-                        rva,
-                        value: slots[&rva],
-                    }],
-                });
-            }
-        }
-        if let Some(run) = current.take() {
-            consider(run, options.min_entries, &mut best);
+        // 2. Sort by RVA: the full referenced-slot set is the candidate IAT.
+        //    It may span several segments (e.g. normal + delay-load thunks);
+        //    curate with `IatTable` when rebuilding.
+        let mut entries: Vec<IatEntry> = slots
+            .into_iter()
+            .map(|(rva, value)| IatEntry { rva, value })
+            .collect();
+        entries.sort_by_key(|e| e.rva);
+        if entries.len() < options.min_entries {
+            return Err(PeError::NotFound(format!(
+                "only {} IAT slots referenced by code (need >= {})",
+                entries.len(),
+                options.min_entries
+            )));
         }
 
-        match best {
-            Some(run) => Ok(IatScan {
-                base_rva: run.base,
-                size: run.entries.len(),
-                entries: run.entries,
-            }),
-            None => Err(PeError::NotFound(format!(
-                "no IAT referenced run with >= {} entries",
-                options.min_entries
-            ))),
-        }
+        Ok(IatScan {
+            base_rva: entries[0].rva,
+            size: entries.len(),
+            entries,
+        })
+    }
+
+    /// Whether `rva` falls inside a non-executable section — a plausible data
+    /// location for an IAT slot.
+    fn slot_in_data(&self, rva: Rva) -> bool {
+        self.sections.iter().any(|s| {
+            let s0 = s.header.virtual_address.get();
+            s0 <= rva.get()
+                && rva.get() < s0 + s.data.len() as u32
+                && s.header.characteristics & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE) == 0
+        })
     }
 
     /// The byte window to scan: the `region` from the options, or the whole
