@@ -419,7 +419,7 @@ impl eframe::App for PeEditorApp {
                         self.open_dialog(ui.ctx());
                         ui.close();
                     }
-                    if ui.button("Dump Process…").clicked() {
+                    if ui.button("选择进程…").clicked() {
                         self.processes = process::list_processes().unwrap_or_default();
                         self.show_process_picker = true;
                         ui.close();
