@@ -551,6 +551,7 @@ impl eframe::App for PeEditorApp {
                     });
                     ui.separator();
                     egui::ScrollArea::vertical()
+                        .id_salt("process_list")
                         .max_height(200.0)
                         .show(ui, |ui| {
                             let filter = self.process_filter.trim().to_lowercase();
@@ -582,6 +583,7 @@ impl eframe::App for PeEditorApp {
                         ui.separator();
                         ui.label(format!("Modules of pid {} — pick one to dump:", self.pid));
                         egui::ScrollArea::vertical()
+                            .id_salt("module_list")
                             .max_height(240.0)
                             .show(ui, |ui| {
                                 let mut dump: Option<(u64, String)> = None;
