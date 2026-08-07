@@ -146,6 +146,11 @@ struct PeEditorApp {
     new_section_size: u32,
     new_import_module: String,
     new_import_func: String,
+    /// Name of the import module selected in the Imports page (left column);
+    /// its functions are shown in the right column.
+    selected_import: Option<String>,
+    /// "Add function" input for the selected module on the Imports page.
+    new_import_add_fn: String,
     /// "Add export" input row state.
     new_export_ordinal: u16,
     new_export_name: String,
@@ -857,49 +862,144 @@ impl PeEditorApp {
 
     fn show_imports(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = self.doc.as_mut() else { return };
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("imports")
-                .num_columns(3)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Module");
-                    ui.label("Functions");
-                    ui.label("");
-                    ui.end_row();
-                    let mut remove: Option<String> = None;
-                    for d in doc.imports() {
-                        ui.label(&d.name);
-                        ui.label(
-                            d.functions
-                                .iter()
-                                .map(|f| f.display_name())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        );
-                        if ui.button("Remove").clicked() {
-                            remove = Some(d.name.clone());
+        // Two columns: import modules on the left, the selected module's
+        // functions on the right. Editing the rich form (`doc.imports`) is
+        // enough — the writer re-renders the physical table on save.
+        ui.columns(2, |cols| {
+            // Left column: add row on top, then the module list.
+            cols[0].vertical(|ui| {
+                ui.label("模块");
+                ui.horizontal(|ui| {
+                    ui.label("Add:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_import_module)
+                            .hint_text("module")
+                            .desired_width(90.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_import_func)
+                            .hint_text("func")
+                            .desired_width(90.0),
+                    );
+                    if ui.button("Add").clicked() {
+                        let module = self.new_import_module.clone();
+                        let func = self.new_import_func.clone();
+                        if module.trim().is_empty() || func.trim().is_empty() {
+                            self.status = "module and function names required".into();
+                        } else {
+                            match doc.add_import(&module, &[ImportFunction::by_name(func.clone())])
+                            {
+                                Ok(()) => {
+                                    self.selected_import = Some(module.clone());
+                                    self.new_import_module.clear();
+                                    self.new_import_func.clear();
+                                    self.status = format!("added import {module}!{func}");
+                                }
+                                Err(e) => self.status = format!("add import failed: {e}"),
+                            }
                         }
-                        ui.end_row();
-                    }
-                    if let Some(m) = remove
-                        && let Err(e) = doc.remove_import(&m)
-                    {
-                        self.status = format!("remove import failed: {e}");
                     }
                 });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Add import:");
-            ui.add(egui::TextEdit::singleline(&mut self.new_import_module).desired_width(130.0));
-            ui.add(egui::TextEdit::singleline(&mut self.new_import_func).desired_width(130.0));
-            if ui.button("Add").clicked() {
-                let module = self.new_import_module.clone();
-                let func = self.new_import_func.clone();
-                match doc.add_import(&module, &[ImportFunction::by_name(func.clone())]) {
-                    Ok(()) => self.status = format!("added import {module}!{func}"),
-                    Err(e) => self.status = format!("add import failed: {e}"),
+                let mut remove: Option<String> = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("import_modules")
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        for d in &doc.imports {
+                            let selected = self.selected_import.as_ref() == Some(&d.name);
+                            let clicked = ui
+                                .horizontal(|ui| {
+                                    let r = ui.selectable_label(
+                                        selected,
+                                        format!("{} ({})", d.name, d.functions.len()),
+                                    );
+                                    if ui.small_button("Remove").clicked() {
+                                        remove = Some(d.name.clone());
+                                    }
+                                    r
+                                })
+                                .inner
+                                .clicked();
+                            if clicked {
+                                self.selected_import = Some(d.name.clone());
+                            }
+                        }
+                        if doc.imports.is_empty() {
+                            ui.weak("no imports");
+                        }
+                    });
+                if let Some(m) = remove {
+                    if self.selected_import.as_deref() == Some(m.as_str()) {
+                        self.selected_import = None;
+                    }
+                    if let Err(e) = doc.remove_import(&m) {
+                        self.status = format!("remove import failed: {e}");
+                    }
                 }
-            }
+            });
+            // Right column: the selected module's functions.
+            cols[1].vertical(|ui| {
+                let Some(idx) = self
+                    .selected_import
+                    .as_ref()
+                    .and_then(|name| doc.imports.iter().position(|d| &d.name == name))
+                else {
+                    ui.weak("在左边选择一个模块");
+                    return;
+                };
+                ui.label(format!(
+                    "{} — {} 个函数",
+                    doc.imports[idx].name,
+                    doc.imports[idx].functions.len()
+                ));
+                ui.horizontal(|ui| {
+                    ui.label("Add fn:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_import_add_fn)
+                            .hint_text("func")
+                            .desired_width(130.0),
+                    );
+                    if ui.button("Add").clicked() {
+                        let func = self.new_import_add_fn.clone();
+                        if !func.trim().is_empty() {
+                            doc.imports[idx]
+                                .functions
+                                .push(ImportFunction::by_name(func));
+                            self.new_import_add_fn.clear();
+                        }
+                    }
+                });
+                let mut remove_fn: Option<usize> = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("import_functions")
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        let desc = &mut doc.imports[idx];
+                        for (i, f) in desc.functions.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                match f {
+                                    ImportFunction::Name { name, .. } => {
+                                        ui.add(
+                                            egui::TextEdit::singleline(name).desired_width(180.0),
+                                        );
+                                    }
+                                    ImportFunction::Ordinal { ordinal } => {
+                                        ui.label(format!("#{ordinal} (ordinal)"));
+                                    }
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    remove_fn = Some(i);
+                                }
+                            });
+                        }
+                        if desc.functions.is_empty() {
+                            ui.weak("no functions");
+                        }
+                    });
+                if let Some(i) = remove_fn {
+                    doc.imports[idx].functions.remove(i);
+                }
+            });
         });
     }
 
