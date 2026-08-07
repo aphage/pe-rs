@@ -28,8 +28,8 @@ use crate::io::pe::parser::{
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, PROCESSENTRY32W, Process32FirstW,
-    Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
+    Process32FirstW, Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::ProcessStatus::{
     EnumProcessModules, GetModuleBaseNameW, GetModuleInformation, MODULEINFO,
@@ -93,6 +93,52 @@ pub fn module_range(pid: u32) -> Result<(u64, u32)> {
     }
 }
 
+/// A module (main exe or loaded DLL) inside a process.
+#[derive(Debug, Clone)]
+pub struct ModuleInfo {
+    /// Short module name (file name, e.g. `kernel32.dll`). The first entry is
+    /// the process's main module.
+    pub name: String,
+    pub base: u64,
+    pub size: u32,
+}
+
+/// List the process's loaded modules (main executable first, then DLLs).
+pub fn list_modules(pid: u32) -> Result<Vec<ModuleInfo>> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(PeError::Io(std::io::Error::last_os_error()));
+        }
+        let mut entry: MODULEENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut out = Vec::new();
+        let mut ok = Module32FirstW(snapshot, &mut entry);
+        while ok != 0 {
+            let len = entry
+                .szModule
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szModule.len());
+            let full = String::from_utf16_lossy(&entry.szModule[..len]);
+            let name = full
+                .rsplit(['\\', '/'])
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&full)
+                .to_string();
+            out.push(ModuleInfo {
+                name,
+                base: entry.modBaseAddr as usize as u64,
+                size: entry.modBaseSize,
+            });
+            ok = Module32NextW(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        Ok(out)
+    }
+}
+
 /// A running process (PID + executable name), for the GUI's process picker.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -129,11 +175,22 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>> {
     }
 }
 
-/// Build a [`PeDocument`] from a running process's main module, reading its
+/// Build a [`PeDocument`] from a running process's **main** module, reading its
 /// image from process memory (each section at `image_base + virtual_address`).
 pub fn dump(pid: u32) -> Result<PeDocument> {
     let (base, _size) = module_range(pid)?;
+    dump_at(pid, base)
+}
 
+/// Build a [`PeDocument`] from **any** loaded module of a process (e.g. a DLL
+/// in the process, not just the main executable). `base` comes from
+/// [`list_modules`].
+pub fn dump_module(pid: u32, base: u64) -> Result<PeDocument> {
+    dump_at(pid, base)
+}
+
+/// Read the PE image at `base` in `pid`'s address space into a [`PeDocument`].
+fn dump_at(pid: u32, base: u64) -> Result<PeDocument> {
     let dos_bytes = read_memory(pid, base, 64)?;
     let dos = parse_dos(&dos_bytes)?;
     if dos.e_magic != DOS_MAGIC {

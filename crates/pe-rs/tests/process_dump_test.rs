@@ -73,3 +73,39 @@ fn resolver_fingerprint_matches_system_module() {
     assert_eq!(via_fingerprint.module.to_lowercase(), "kernel32.dll");
     assert_eq!(via_fingerprint.function.name(), Some("GetProcAddress"));
 }
+
+#[test]
+#[ignore]
+fn list_modules_includes_current_process() {
+    let pid = std::process::id();
+    let modules = process::list_modules(pid).expect("list modules");
+    assert!(!modules.is_empty(), "expected at least the main module");
+    assert!(!modules[0].name.is_empty(), "main module has a name");
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_lowercase()));
+    if let Some(exe) = exe {
+        assert!(
+            modules.iter().any(|m| m.name.to_lowercase() == exe),
+            "current exe {exe} should be listed"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn dump_module_current_main_module() {
+    let pid = std::process::id();
+    let modules = process::list_modules(pid).expect("list modules");
+    let base = modules[0].base;
+    let doc = process::dump_module(pid, base).expect("dump main module via base");
+    assert!(!doc.sections.is_empty(), "expected sections");
+    assert!(
+        !doc.imports.is_empty(),
+        "expected imports in the test binary"
+    );
+    // dump_module(pid, main-module base) must agree with dump(pid).
+    let via_dump = process::dump(pid).expect("dump main module");
+    assert_eq!(doc.sections.len(), via_dump.sections.len());
+    assert_eq!(doc.imports.len(), via_dump.imports.len());
+}
