@@ -456,6 +456,7 @@ impl eframe::App for PeEditorApp {
                     }
                     if ui.button("选择进程…").clicked() {
                         self.processes = process::list_processes().unwrap_or_default();
+                        self.modules.clear();
                         self.show_process_picker = true;
                         ui.close();
                     }
@@ -532,9 +533,10 @@ impl eframe::App for PeEditorApp {
         });
 
         // Process picker: filter + click a process to load its modules, then
-        // dump the main module or any loaded DLL.
+        // dump the main module or any loaded DLL. Dismiss with the X or Cancel.
+        let mut close_picker = false;
         if self.show_process_picker {
-            egui::Window::new("Select process")
+            let resp = egui::Window::new("选择进程")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(560.0)
@@ -600,11 +602,19 @@ impl eframe::App for PeEditorApp {
                                     if let Ok(pid) = self.pid.parse() {
                                         self.dump_module_at(pid, Some(base), &name);
                                     }
-                                    self.show_process_picker = false;
+                                    close_picker = true;
                                 }
                             });
                     }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("取消").clicked() {
+                            close_picker = true;
+                        }
+                    });
                 });
+            // None from Window::show means it was dismissed via the title-bar X.
+            self.show_process_picker = resp.is_some() && !close_picker;
         }
 
         // Save-time confirmation: the import table looks broken, the user can
