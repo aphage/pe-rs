@@ -533,13 +533,14 @@ impl eframe::App for PeEditorApp {
         });
 
         // Process picker: filter + click a process to load its modules, then
-        // dump the main module or any loaded DLL. Dismiss with the X or Cancel.
+        // pick the main module or any loaded DLL. Dismiss with the X or Cancel.
         let mut close_picker = false;
         if self.show_process_picker {
             let resp = egui::Window::new("选择进程")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(560.0)
+                .default_height(480.0)
                 .show(ui.ctx(), |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Filter:");
@@ -552,9 +553,13 @@ impl eframe::App for PeEditorApp {
                         }
                     });
                     ui.separator();
+                    // One scroll area fills the window, so the scrollbar sits
+                    // flush with the edge and the window can be dragged to any
+                    // size vertically. Picking a pid appends its module list
+                    // below the process list in the same scroll area.
                     egui::ScrollArea::vertical()
                         .id_salt("process_list")
-                        .max_height(200.0)
+                        .auto_shrink(false)
                         .show(ui, |ui| {
                             let filter = self.process_filter.trim().to_lowercase();
                             let mut pick_pid: Option<u32> = None;
@@ -579,21 +584,19 @@ impl eframe::App for PeEditorApp {
                                 self.pid = pid.to_string();
                                 self.modules = process::list_modules(pid).unwrap_or_default();
                             }
-                        });
-                    // Module dump area: main module first, then loaded DLLs.
-                    if !self.pid.is_empty() {
-                        ui.separator();
-                        ui.label(format!("Modules of pid {} — pick one to dump:", self.pid));
-                        egui::ScrollArea::vertical()
-                            .id_salt("module_list")
-                            .max_height(240.0)
-                            .show(ui, |ui| {
+                            // Module area: main module first, then loaded DLLs.
+                            if !self.pid.is_empty() {
+                                ui.separator();
+                                ui.label(format!(
+                                    "Modules of pid {} — pick one to load:",
+                                    self.pid
+                                ));
                                 let mut dump: Option<(u64, String)> = None;
                                 for (i, m) in self.modules.iter().enumerate() {
                                     let mark = if i == 0 { "[main] " } else { "       " };
                                     ui.horizontal(|ui| {
                                         ui.label(format!("{mark}{:<28} {:#x}", m.name, m.base));
-                                        if ui.button("Dump").clicked() {
+                                        if ui.button("Pick").clicked() {
                                             dump = Some((m.base, m.name.clone()));
                                         }
                                     });
@@ -604,8 +607,8 @@ impl eframe::App for PeEditorApp {
                                     }
                                     close_picker = true;
                                 }
-                            });
-                    }
+                            }
+                        });
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("取消").clicked() {
