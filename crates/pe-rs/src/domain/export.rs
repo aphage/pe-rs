@@ -14,7 +14,7 @@ pub struct ExportSymbol {
 }
 
 /// The parsed export table of a PE.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExportTable {
     pub module_name: Option<String>,
     pub base: u32,

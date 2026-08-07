@@ -5,6 +5,7 @@
 
 pub mod directory_editor;
 pub mod editor;
+pub mod exporter;
 pub mod iat_fixer;
 pub mod iat_scanner;
 pub mod importer;
@@ -13,6 +14,7 @@ pub mod viewer;
 
 pub use directory_editor::DirectoryEditor;
 pub use editor::PeEditor;
+pub use exporter::ExportTableEditor;
 pub use iat_fixer::IatFixer;
 pub use iat_scanner::IatScanner;
 pub use importer::ImportTableEditor;

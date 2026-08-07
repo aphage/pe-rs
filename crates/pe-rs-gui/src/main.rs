@@ -5,13 +5,13 @@
 //! fix its IAT, and save the result.
 
 use eframe::egui;
-use pe_rs::api::{IatFixer, IatScanner, ImportTableEditor, PeEditor, PeViewer};
+use pe_rs::api::{ExportTableEditor, IatFixer, IatScanner, ImportTableEditor, PeEditor, PeViewer};
 use pe_rs::domain::section::{
     IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
 };
 use pe_rs::domain::{
-    DataDirectoryIndex, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva, ScanMethod,
-    ScanOptions,
+    DataDirectoryIndex, ExportSymbol, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva,
+    ScanMethod, ScanOptions,
 };
 use pe_rs::io::pe::{parse, serialize};
 use pe_rs::process::{self, ProcessInfo, ProcessResolver};
@@ -85,6 +85,10 @@ struct PeEditorApp {
     new_section_size: u32,
     new_import_module: String,
     new_import_func: String,
+    /// "Add export" input row state.
+    new_export_ordinal: u16,
+    new_export_name: String,
+    new_export_rva: u32,
     /// Pending async "open file" dialog result.
     pick_rx: Option<mpsc::Receiver<PickResult>>,
     /// Pending async "save file" dialog result.
@@ -645,26 +649,82 @@ impl PeEditorApp {
     }
 
     fn show_exports(&mut self, ui: &mut egui::Ui) {
-        let Some(doc) = self.doc.as_ref() else { return };
+        let Some(doc) = self.doc.as_mut() else { return };
+        let mut remove: Option<u16> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("exports")
-                .num_columns(3)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Ordinal");
-                    ui.label("Name");
-                    ui.label("RVA");
-                    ui.end_row();
-                    if let Some(exports) = doc.exports() {
-                        for s in &exports.symbols {
+            if let Some(exports) = doc.exports.as_mut() {
+                egui::Grid::new("exports")
+                    .num_columns(5)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Ordinal");
+                        ui.label("Name");
+                        ui.label("RVA");
+                        ui.label("Forwarder");
+                        ui.label("");
+                        ui.end_row();
+                        for s in &mut exports.symbols {
                             ui.label(format!("{}", s.ordinal));
-                            ui.label(s.name.as_deref().unwrap_or("<ordinal>"));
-                            ui.label(format!("{:#x}", s.rva.get()));
+                            ui.add(
+                                egui::TextEdit::singleline(s.name.get_or_insert_default())
+                                    .desired_width(180.0),
+                            );
+                            ui.add(egui::DragValue::new(&mut s.rva.0).hexadecimal(8, false, true));
+                            ui.add(
+                                egui::TextEdit::singleline(s.forwarder.get_or_insert_default())
+                                    .desired_width(200.0),
+                            );
+                            if ui.button("Remove").clicked() {
+                                remove = Some(s.ordinal);
+                            }
                             ui.end_row();
                         }
-                    }
-                });
+                    });
+            } else {
+                ui.label("No export table — add a symbol below to create one.");
+            }
         });
+        if let Some(exports) = doc.exports.as_mut() {
+            ui.horizontal(|ui| {
+                ui.label("Module:");
+                ui.add(
+                    egui::TextEdit::singleline(exports.module_name.get_or_insert_default())
+                        .desired_width(200.0),
+                );
+                ui.label("Base:");
+                ui.add(egui::DragValue::new(&mut exports.base).hexadecimal(8, false, true));
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Add:");
+            ui.add(egui::DragValue::new(&mut self.new_export_ordinal));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_export_name)
+                    .hint_text("name (empty = ordinal-only)")
+                    .desired_width(200.0),
+            );
+            ui.add(egui::DragValue::new(&mut self.new_export_rva).hexadecimal(8, false, true));
+            if ui.button("Add export").clicked() {
+                let name = self.new_export_name.trim();
+                let symbol = ExportSymbol {
+                    name: (!name.is_empty()).then(|| name.to_string()),
+                    ordinal: self.new_export_ordinal,
+                    rva: Rva(self.new_export_rva),
+                    forwarder: None,
+                };
+                match doc.add_export(symbol) {
+                    Ok(()) => {
+                        self.status = format!("added export ordinal {}", self.new_export_ordinal)
+                    }
+                    Err(e) => self.status = format!("add export failed: {e}"),
+                }
+            }
+        });
+        if let Some(o) = remove
+            && let Err(e) = doc.remove_export(o)
+        {
+            self.status = format!("remove export failed: {e}");
+        }
     }
 
     fn show_directories(&mut self, ui: &mut egui::Ui) {
