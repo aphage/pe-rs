@@ -10,8 +10,8 @@ use pe_rs::domain::section::{
     IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
 };
 use pe_rs::domain::{
-    DataDirectoryIndex, ExportSymbol, IatFixOptions, IatScan, ImportFunction, PeDocument, Rva,
-    ScanMethod, ScanOptions,
+    DataDirectoryIndex, ExportSymbol, IatEntry, IatFixOptions, IatScan, IatTable, ImportFunction,
+    PeDocument, Rva, ScanMethod, ScanOptions,
 };
 use pe_rs::io::pe::{parse, serialize};
 use pe_rs::process::{self, ProcessInfo, ProcessResolver};
@@ -75,6 +75,15 @@ struct PeEditorApp {
     doc: Option<PeDocument>,
     resolver: Option<ProcessResolver>,
     scan: Option<IatScan>,
+    /// Curated IAT entries (scan result + hand-added regions) with one keep
+    /// flag per entry — uncheck to drop a false positive before fixing.
+    iat_entries: Vec<IatEntry>,
+    iat_keep: Vec<bool>,
+    /// "Add region" / "Add entry" input state for the IAT page.
+    iat_region_rva: u32,
+    iat_region_size: u32,
+    iat_add_rva: u32,
+    iat_add_value: u64,
     /// Scan method used by the "Scan IAT" button (Resolver / Code references /
     /// Reflection — see `ScanMethod`).
     scan_method: ScanMethod,
@@ -123,6 +132,8 @@ impl PeEditorApp {
 
     fn load_file(&mut self) {
         self.scan = None;
+        self.iat_entries.clear();
+        self.iat_keep.clear();
         match std::fs::read(&self.path) {
             Ok(bytes) => match parse(&bytes) {
                 Ok(doc) => {
@@ -138,6 +149,8 @@ impl PeEditorApp {
 
     fn dump_process(&mut self) {
         self.scan = None;
+        self.iat_entries.clear();
+        self.iat_keep.clear();
         let pid: u32 = match self.pid.trim().parse() {
             Ok(p) => p,
             Err(_) => {
@@ -172,6 +185,8 @@ impl PeEditorApp {
         };
         match doc.scan(resolver, &opts) {
             Ok(scan) => {
+                self.iat_entries = scan.entries.clone();
+                self.iat_keep = vec![true; scan.entries.len()];
                 self.status = format!(
                     "scan ({}) — IAT at {:#x}, {} entries",
                     scan_method_name(method),
@@ -751,34 +766,113 @@ impl PeEditorApp {
     }
 
     fn show_iat(&mut self, ui: &mut egui::Ui) {
-        match &self.scan {
-            Some(scan) => {
-                ui.label(format!(
-                    "IAT at {:#x}, {} entries",
-                    scan.base_rva.get(),
-                    scan.entries.len()
-                ));
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("iat")
-                        .num_columns(3)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.label("#");
-                            ui.label("RVA");
-                            ui.label("Value");
-                            ui.end_row();
-                            for (i, e) in scan.entries.iter().enumerate() {
-                                ui.label(format!("{i}"));
-                                ui.label(format!("{:#x}", e.rva.get()));
-                                ui.label(format!("{:#x}", e.value));
-                                ui.end_row();
-                            }
-                        });
-                });
-            }
-            None => {
-                ui.label("Dump a process, then Scan IAT to see the table here.");
-            }
+        let Some(doc) = self.doc.as_mut() else { return };
+        let resolver = self.resolver.as_ref();
+        let status = &mut self.status;
+        let entries = &mut self.iat_entries;
+        let keep = &mut self.iat_keep;
+        let mut region_rva = self.iat_region_rva;
+        let mut region_size = self.iat_region_size;
+        let mut add_rva = self.iat_add_rva;
+        let mut add_value = self.iat_add_value;
+
+        if entries.is_empty() {
+            ui.label("Dump a process, then Scan IAT to curate the table here.");
+            return;
         }
+
+        let kept = entries.iter().zip(keep.iter()).filter(|(_, k)| **k).count();
+        ui.label(format!(
+            "IAT — {} entries, {} kept (uncheck to drop false positives)",
+            entries.len(),
+            kept
+        ));
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("iat")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("#");
+                    ui.label("RVA");
+                    ui.label("Value");
+                    ui.label("Keep");
+                    ui.end_row();
+                    for (i, (e, k)) in entries.iter().zip(keep.iter_mut()).enumerate() {
+                        ui.label(format!("{i}"));
+                        ui.label(format!("{:#x}", e.rva.get()));
+                        ui.label(format!("{:#x}", e.value));
+                        ui.checkbox(k, "");
+                        ui.end_row();
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Add region (RVA, size):");
+            ui.add(egui::DragValue::new(&mut region_rva).hexadecimal(8, false, true));
+            ui.add(egui::DragValue::new(&mut region_size));
+            if ui.button("Add region").clicked() {
+                let mut t = IatTable::new();
+                match t.add_region(doc, Rva(region_rva), region_size as usize) {
+                    Ok(()) => {
+                        let added = t.entries().to_vec();
+                        let n = added.len();
+                        entries.extend(added);
+                        keep.extend(std::iter::repeat_n(true, n));
+                        *status = format!("added {n} entries from region {:#x}", region_rva);
+                    }
+                    Err(e) => *status = format!("add region failed: {e}"),
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Add entry (RVA, value):");
+            ui.add(egui::DragValue::new(&mut add_rva).hexadecimal(8, false, true));
+            ui.add(egui::DragValue::new(&mut add_value).hexadecimal(16, false, true));
+            if ui.button("Add entry").clicked() {
+                entries.push(IatEntry {
+                    rva: Rva(add_rva),
+                    value: add_value,
+                });
+                keep.push(true);
+                *status = format!("added entry {:#x} = {:#x}", add_rva, add_value);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.separator();
+            if ui.button("Fix curated table").clicked() {
+                let Some(resolver) = resolver else {
+                    *status = "no process resolver".into();
+                    return;
+                };
+                let kept: Vec<IatEntry> = entries
+                    .iter()
+                    .zip(keep.iter())
+                    .filter(|(_, k)| **k)
+                    .map(|(e, _)| *e)
+                    .collect();
+                if kept.is_empty() {
+                    *status = "no entries kept".into();
+                    return;
+                }
+                let table = IatTable::from_entries(kept);
+                match doc.fix_iat_table(&table, resolver, &IatFixOptions::default()) {
+                    Ok(report) => {
+                        *status = format!(
+                            "fixed {} imports ({} unresolved, new table at {:#x})",
+                            report.imports_built,
+                            report.unresolved.len(),
+                            report.new_import_rva.map(|r| r.get()).unwrap_or(0),
+                        )
+                    }
+                    Err(e) => *status = format!("fix curated failed: {e}"),
+                }
+            }
+        });
+
+        self.iat_region_rva = region_rva;
+        self.iat_region_size = region_size;
+        self.iat_add_rva = add_rva;
+        self.iat_add_value = add_value;
     }
 }
