@@ -22,6 +22,34 @@ use std::sync::mpsc;
 /// Result of an async file dialog (picked path, or `None` if cancelled).
 type PickResult = Option<std::path::PathBuf>;
 
+/// egui's bundled fonts have no CJK glyphs, so Chinese UI text renders as
+/// boxes. Install a Windows system CJK font as a fallback family.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for path in [
+        "C:/Windows/Fonts/msyh.ttc",   // Microsoft YaHei (collection)
+        "C:/Windows/Fonts/simhei.ttf", // SimHei
+        "C:/Windows/Fonts/Deng.ttf",   // DengXian
+    ] {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        fonts.font_data.insert(
+            "cjk".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("cjk".to_owned());
+        }
+        break;
+    }
+    ctx.set_fonts(fonts);
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]),
@@ -30,7 +58,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PE Editor",
         options,
-        Box::new(|_cc| Ok(Box::new(PeEditorApp::default()))),
+        Box::new(|cc| {
+            install_fonts(&cc.egui_ctx);
+            Ok(Box::new(PeEditorApp::default()))
+        }),
     )
 }
 
@@ -82,6 +113,9 @@ enum Source {
 struct PeEditorApp {
     path: String,
     pid: String,
+    /// Short label of the dumped module ("main module" or the DLL name), for
+    /// the document-source line in the toolbar.
+    dump_label: String,
     save_path: String,
     doc: Option<PeDocument>,
     resolver: Option<ProcessResolver>,
@@ -185,6 +219,7 @@ impl PeEditorApp {
                 self.resolver = ProcessResolver::for_process(pid).ok();
                 self.doc = Some(doc);
                 self.source = Source::Dump;
+                self.dump_label = label.to_string();
                 self.sync_header_edits();
                 self.status = format!("dumped {label} (pid {pid})");
             }
@@ -455,35 +490,25 @@ impl eframe::App for PeEditorApp {
             self.open_dialog(ui.ctx());
         }
 
-        // Slim toolbar: path / PID quick entry plus the status line.
+        // Document-source line: what we are editing (a file path, or a dumped
+        // process/module) plus the status. Opening/dumping happens via the menu.
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("PE:");
-                let resp = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(260.0));
-                let enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
-                if resp.lost_focus() && enter {
-                    self.load_file();
-                }
-                if ui.button("Load").clicked() {
-                    self.load_file();
-                }
-                if ui.button("Browse…").clicked() {
-                    self.open_dialog(ui.ctx());
-                }
-
-                ui.separator();
-                ui.label("PID:");
-                ui.add(egui::TextEdit::singleline(&mut self.pid).desired_width(60.0));
-                if ui.button("Dump").clicked() {
-                    match self.pid.trim().parse::<u32>() {
-                        Ok(p) => self.dump_module_at(p, None, "main module"),
-                        Err(_) => self.status = "invalid pid".into(),
+                match self.source {
+                    Source::File => {
+                        ui.label("文件:");
+                        if self.path.is_empty() {
+                            ui.weak("(未打开)");
+                        } else {
+                            ui.label(&self.path);
+                        }
+                    }
+                    Source::Dump => {
+                        ui.label("进程:");
+                        ui.label(format!("pid {} · {}", self.pid, self.dump_label));
                     }
                 }
-                if ui.button("Select…").clicked() {
-                    self.processes = process::list_processes().unwrap_or_default();
-                    self.show_process_picker = true;
-                }
+                ui.separator();
                 ui.label(&self.status);
             });
         });
