@@ -532,16 +532,24 @@ impl eframe::App for PeEditorApp {
             }
         });
 
-        // Process picker: filter + click a process to load its modules, then
-        // pick the main module or any loaded DLL. Dismiss with the X or Cancel.
+        // Process picker: a modal dialog — filter + click a process to load
+        // its modules, then pick the main module or any loaded DLL. Dismiss
+        // via the ✕ button, Cancel, ESC, or clicking the backdrop.
         let mut close_picker = false;
         if self.show_process_picker {
-            let resp = egui::Window::new("选择进程")
-                .collapsible(false)
-                .resizable(true)
-                .default_width(560.0)
-                .default_height(480.0)
-                .show(ui.ctx(), |ui| {
+            let resp =
+                egui::Modal::new(egui::Id::new("process_picker_modal")).show(ui.ctx(), |ui| {
+                    // The modal frame has no built-in title bar, so put the
+                    // title and a ✕ close button on one row.
+                    ui.horizontal(|ui| {
+                        ui.strong("选择进程");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("✕").clicked() {
+                                close_picker = true;
+                            }
+                        });
+                    });
+                    ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Filter:");
                         ui.add(
@@ -553,13 +561,15 @@ impl eframe::App for PeEditorApp {
                         }
                     });
                     ui.separator();
-                    // One scroll area fills the window, so the scrollbar sits
-                    // flush with the edge and the window can be dragged to any
-                    // size vertically. Picking a pid appends its module list
-                    // below the process list in the same scroll area.
+                    // One scroll area holds the process list and, once a pid is
+                    // picked, the module list. Fixed width/height keep the
+                    // modal at a dialog size; the scrollbar sits flush with
+                    // the modal edge.
                     egui::ScrollArea::vertical()
                         .id_salt("process_list")
                         .auto_shrink(false)
+                        .max_width(560.0)
+                        .max_height(400.0)
                         .show(ui, |ui| {
                             let filter = self.process_filter.trim().to_lowercase();
                             let mut pick_pid: Option<u32> = None;
@@ -616,8 +626,11 @@ impl eframe::App for PeEditorApp {
                         }
                     });
                 });
-            // None from Window::show means it was dismissed via the title-bar X.
-            self.show_process_picker = resp.is_some() && !close_picker;
+            // Close on ✕ / ESC / backdrop click (`should_close`), or on Cancel
+            // / a module picked (`close_picker`).
+            if resp.should_close() || close_picker {
+                self.show_process_picker = false;
+            }
         }
 
         // Save-time confirmation: the import table looks broken, the user can
