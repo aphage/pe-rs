@@ -158,6 +158,8 @@ struct PeEditorApp {
     processes: Vec<ProcessInfo>,
     /// Loaded modules of the process selected in the picker (module-level dump).
     modules: Vec<ModuleInfo>,
+    /// Index into `modules` of the highlighted row in the picker's module list.
+    selected_module: Option<usize>,
     process_filter: String,
     show_process_picker: bool,
 }
@@ -457,6 +459,7 @@ impl eframe::App for PeEditorApp {
                     if ui.button("选择进程…").clicked() {
                         self.processes = process::list_processes().unwrap_or_default();
                         self.modules.clear();
+                        self.selected_module = None;
                         self.show_process_picker = true;
                         ui.close();
                     }
@@ -533,9 +536,9 @@ impl eframe::App for PeEditorApp {
         });
 
         // Process picker: a separate native window, detached from the main
-        // window — filter + click a process to load its modules, then pick
-        // the main module or any loaded DLL. Dismiss via the Cancel button,
-        // ESC, or the window's own close button.
+        // window — pick a process on the left, then pick one of its modules on
+        // the right. Dismiss via the Cancel button, ESC, or the window's own
+        // close button.
         let mut close_picker = false;
         if self.show_process_picker {
             let ctx = ui.ctx().clone();
@@ -543,7 +546,7 @@ impl eframe::App for PeEditorApp {
                 egui::ViewportId::from_hash_of("process_picker_viewport"),
                 egui::ViewportBuilder::default()
                     .with_title("选择进程")
-                    .with_inner_size([640.0, 480.0])
+                    .with_inner_size([760.0, 480.0])
                     .with_resizable(true),
                 |ui, _class| {
                     // The user closed the window (X / Alt+F4) or pressed ESC.
@@ -577,60 +580,122 @@ impl eframe::App for PeEditorApp {
                             }
                         });
                         ui.separator();
-                        // One scroll area fills the window, holding the process
-                        // list and, once a pid is picked, the module list below.
-                        egui::ScrollArea::vertical()
-                            .id_salt("process_list")
-                            .auto_shrink(false)
-                            .show(ui, |ui| {
-                                let filter = self.process_filter.trim().to_lowercase();
-                                let mut pick_pid: Option<u32> = None;
-                                for p in &self.processes {
-                                    let matches = filter.is_empty()
-                                        || p.name.to_lowercase().contains(&filter)
-                                        || p.pid.to_string().contains(&filter);
-                                    if !matches {
-                                        continue;
+                        // Two columns: processes on the left, their modules on
+                        // the right. Each list fills its own column.
+                        ui.columns(2, |cols| {
+                            // Left: process list.
+                            cols[0].vertical(|ui| {
+                                ui.label("进程");
+                                egui::ScrollArea::vertical()
+                                    .id_salt("process_list")
+                                    .auto_shrink(false)
+                                    .show(ui, |ui| {
+                                        let filter = self.process_filter.trim().to_lowercase();
+                                        let current = if self.modules.is_empty() {
+                                            None
+                                        } else {
+                                            self.pid.parse::<u32>().ok()
+                                        };
+                                        let mut pick_pid: Option<u32> = None;
+                                        for p in &self.processes {
+                                            let matches = filter.is_empty()
+                                                || p.name.to_lowercase().contains(&filter)
+                                                || p.pid.to_string().contains(&filter);
+                                            if !matches {
+                                                continue;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    current == Some(p.pid),
+                                                    format!("{:<7} {}", p.pid, p.name),
+                                                )
+                                                .clicked()
+                                            {
+                                                pick_pid = Some(p.pid);
+                                            }
+                                        }
+                                        if self.processes.is_empty() {
+                                            ui.weak("no processes");
+                                        }
+                                        if let Some(pid) = pick_pid {
+                                            self.pid = pid.to_string();
+                                            self.modules =
+                                                process::list_modules(pid).unwrap_or_default();
+                                            self.selected_module = None;
+                                        }
+                                    });
+                            });
+                            // Right: module list with one independent
+                            // "选择模块" button instead of a button per row.
+                            cols[1].vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    if self.modules.is_empty() {
+                                        ui.label("模块");
+                                    } else {
+                                        ui.label(format!("模块 (pid {})", self.pid));
                                     }
-                                    if ui
-                                        .selectable_label(false, format!("{:<7} {}", p.pid, p.name))
-                                        .clicked()
-                                    {
-                                        pick_pid = Some(p.pid);
-                                    }
-                                }
-                                if self.processes.is_empty() {
-                                    ui.label("no processes");
-                                }
-                                if let Some(pid) = pick_pid {
-                                    self.pid = pid.to_string();
-                                    self.modules = process::list_modules(pid).unwrap_or_default();
-                                }
-                                // Module area: main module first, then loaded DLLs.
-                                if !self.pid.is_empty() {
-                                    ui.separator();
-                                    ui.label(format!(
-                                        "Modules of pid {} — pick one to load:",
-                                        self.pid
-                                    ));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let enabled = self.selected_module.is_some();
+                                            if ui
+                                                .add_enabled(enabled, egui::Button::new("选择模块"))
+                                                .clicked()
+                                            {
+                                                let module = self
+                                                    .selected_module
+                                                    .and_then(|idx| self.modules.get(idx))
+                                                    .map(|m| (m.base, m.name.clone()));
+                                                if let Some((base, name)) = module {
+                                                    self.dump_module_at(
+                                                        self.pid.parse().unwrap_or(0),
+                                                        Some(base),
+                                                        &name,
+                                                    );
+                                                    close_picker = true;
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+                                if self.modules.is_empty() {
+                                    ui.weak("在左边选择一个进程");
+                                } else {
                                     let mut dump: Option<(u64, String)> = None;
-                                    for (i, m) in self.modules.iter().enumerate() {
-                                        let mark = if i == 0 { "[main] " } else { "       " };
-                                        ui.horizontal(|ui| {
-                                            ui.label(format!("{mark}{:<28} {:#x}", m.name, m.base));
-                                            if ui.button("Pick").clicked() {
-                                                dump = Some((m.base, m.name.clone()));
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("module_list")
+                                        .auto_shrink(false)
+                                        .show(ui, |ui| {
+                                            for (i, m) in self.modules.iter().enumerate() {
+                                                let mark =
+                                                    if i == 0 { "[main] " } else { "       " };
+                                                let selected = self.selected_module == Some(i);
+                                                let resp = ui.selectable_label(
+                                                    selected,
+                                                    format!("{mark}{:<28} {:#x}", m.name, m.base),
+                                                );
+                                                if resp.double_clicked() {
+                                                    self.selected_module = Some(i);
+                                                    dump = Some((m.base, m.name.clone()));
+                                                } else if resp.clicked() {
+                                                    self.selected_module = Some(i);
+                                                }
+                                            }
+                                            if self.modules.is_empty() {
+                                                ui.weak("no modules");
                                             }
                                         });
-                                    }
                                     if let Some((base, name)) = dump {
-                                        if let Ok(pid) = self.pid.parse() {
-                                            self.dump_module_at(pid, Some(base), &name);
-                                        }
+                                        self.dump_module_at(
+                                            self.pid.parse().unwrap_or(0),
+                                            Some(base),
+                                            &name,
+                                        );
                                         close_picker = true;
                                     }
                                 }
                             });
+                        });
                     });
                 },
             );
