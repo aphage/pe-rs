@@ -532,96 +532,109 @@ impl eframe::App for PeEditorApp {
             }
         });
 
-        // Process picker: a full-screen modal — filter + click a process to
-        // load its modules, then pick the main module or any loaded DLL.
-        // Dismiss via Cancel, ESC, or clicking the backdrop.
+        // Process picker: a separate native window, detached from the main
+        // window — filter + click a process to load its modules, then pick
+        // the main module or any loaded DLL. Dismiss via the Cancel button,
+        // ESC, or the window's own close button.
         let mut close_picker = false;
         if self.show_process_picker {
-            let id = egui::Id::new("process_picker_modal");
-            let screen = ui.ctx().content_rect();
-            let resp = egui::Modal::new(id)
-                .area(egui::Modal::default_area(id).default_size(screen.size()))
-                .show(ui.ctx(), |ui| {
-                    // Header row: title on the left, Cancel on the right.
-                    ui.horizontal(|ui| {
-                        ui.strong("选择进程");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("取消").clicked() {
-                                close_picker = true;
-                            }
-                        });
-                    });
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Filter:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.process_filter)
-                                .desired_width(220.0),
-                        );
-                        if ui.button("Refresh").clicked() {
-                            self.processes = process::list_processes().unwrap_or_default();
-                        }
-                    });
-                    ui.separator();
-                    // One scroll area fills the rest of the screen, holding the
-                    // process list and, once a pid is picked, the module list
-                    // below it.
-                    egui::ScrollArea::vertical()
-                        .id_salt("process_list")
-                        .auto_shrink(false)
-                        .show(ui, |ui| {
-                            let filter = self.process_filter.trim().to_lowercase();
-                            let mut pick_pid: Option<u32> = None;
-                            for p in &self.processes {
-                                let matches = filter.is_empty()
-                                    || p.name.to_lowercase().contains(&filter)
-                                    || p.pid.to_string().contains(&filter);
-                                if !matches {
-                                    continue;
-                                }
-                                if ui
-                                    .selectable_label(false, format!("{:<7} {}", p.pid, p.name))
-                                    .clicked()
-                                {
-                                    pick_pid = Some(p.pid);
-                                }
-                            }
-                            if self.processes.is_empty() {
-                                ui.label("no processes");
-                            }
-                            if let Some(pid) = pick_pid {
-                                self.pid = pid.to_string();
-                                self.modules = process::list_modules(pid).unwrap_or_default();
-                            }
-                            // Module area: main module first, then loaded DLLs.
-                            if !self.pid.is_empty() {
-                                ui.separator();
-                                ui.label(format!(
-                                    "Modules of pid {} — pick one to load:",
-                                    self.pid
-                                ));
-                                let mut dump: Option<(u64, String)> = None;
-                                for (i, m) in self.modules.iter().enumerate() {
-                                    let mark = if i == 0 { "[main] " } else { "       " };
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("{mark}{:<28} {:#x}", m.name, m.base));
-                                        if ui.button("Pick").clicked() {
-                                            dump = Some((m.base, m.name.clone()));
-                                        }
-                                    });
-                                }
-                                if let Some((base, name)) = dump {
-                                    if let Ok(pid) = self.pid.parse() {
-                                        self.dump_module_at(pid, Some(base), &name);
+            let ctx = ui.ctx().clone();
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("process_picker_viewport"),
+                egui::ViewportBuilder::default()
+                    .with_title("选择进程")
+                    .with_inner_size([640.0, 480.0])
+                    .with_resizable(true),
+                |ui, _class| {
+                    // The user closed the window (X / Alt+F4) or pressed ESC.
+                    if ui.ctx().input(|i| i.viewport().close_requested())
+                        || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        close_picker = true;
+                    }
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        // Header row: title on the left, Cancel on the right.
+                        ui.horizontal(|ui| {
+                            ui.strong("选择进程");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("取消").clicked() {
+                                        close_picker = true;
                                     }
-                                    close_picker = true;
-                                }
+                                },
+                            );
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Filter:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.process_filter)
+                                    .desired_width(220.0),
+                            );
+                            if ui.button("Refresh").clicked() {
+                                self.processes = process::list_processes().unwrap_or_default();
                             }
                         });
-                });
-            // Close on ESC / backdrop click (`should_close`), or on Cancel / a
-            // module picked (`close_picker`).
-            if resp.should_close() || close_picker {
+                        ui.separator();
+                        // One scroll area fills the window, holding the process
+                        // list and, once a pid is picked, the module list below.
+                        egui::ScrollArea::vertical()
+                            .id_salt("process_list")
+                            .auto_shrink(false)
+                            .show(ui, |ui| {
+                                let filter = self.process_filter.trim().to_lowercase();
+                                let mut pick_pid: Option<u32> = None;
+                                for p in &self.processes {
+                                    let matches = filter.is_empty()
+                                        || p.name.to_lowercase().contains(&filter)
+                                        || p.pid.to_string().contains(&filter);
+                                    if !matches {
+                                        continue;
+                                    }
+                                    if ui
+                                        .selectable_label(false, format!("{:<7} {}", p.pid, p.name))
+                                        .clicked()
+                                    {
+                                        pick_pid = Some(p.pid);
+                                    }
+                                }
+                                if self.processes.is_empty() {
+                                    ui.label("no processes");
+                                }
+                                if let Some(pid) = pick_pid {
+                                    self.pid = pid.to_string();
+                                    self.modules = process::list_modules(pid).unwrap_or_default();
+                                }
+                                // Module area: main module first, then loaded DLLs.
+                                if !self.pid.is_empty() {
+                                    ui.separator();
+                                    ui.label(format!(
+                                        "Modules of pid {} — pick one to load:",
+                                        self.pid
+                                    ));
+                                    let mut dump: Option<(u64, String)> = None;
+                                    for (i, m) in self.modules.iter().enumerate() {
+                                        let mark = if i == 0 { "[main] " } else { "       " };
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("{mark}{:<28} {:#x}", m.name, m.base));
+                                            if ui.button("Pick").clicked() {
+                                                dump = Some((m.base, m.name.clone()));
+                                            }
+                                        });
+                                    }
+                                    if let Some((base, name)) = dump {
+                                        if let Ok(pid) = self.pid.parse() {
+                                            self.dump_module_at(pid, Some(base), &name);
+                                        }
+                                        close_picker = true;
+                                    }
+                                }
+                            });
+                    });
+                },
+            );
+            if close_picker {
                 self.show_process_picker = false;
             }
         }
