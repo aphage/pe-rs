@@ -67,7 +67,7 @@ fn scan_for(scenario: &str) -> ScanOptions {
     match scenario {
         "normal" | "a" => opts(ScanMethod::CodeReference, true),
         "oft" | "b" | "iatdir" | "c" => opts(ScanMethod::Reflection, true),
-        "erased" | "d" => opts(ScanMethod::CodeReference, true),
+        "erased" | "d" | "pollute" | "p" => opts(ScanMethod::CodeReference, true),
         other => panic!("unknown scenario '{other}'"),
     }
 }
@@ -115,4 +115,58 @@ fn all_scenarios_dump_fix_and_rerun() {
         );
         std::fs::remove_file(&out).ok();
     }
+}
+
+/// The `pollute` scenario stores a non-executable external pointer (a stack
+/// address) into a `.reloc`-covered `.data` slot. `rebase_dump` must make its
+/// dump re-run: without rebase the fixed dump crashes (the slot is re-relocated
+/// into garbage / non-executable), with rebase it is cleared and lazily
+/// re-resolved.
+#[test]
+#[ignore]
+fn pollute_scenario_rebase_makes_dump_rerun() {
+    let (mut target, pid) = spawn_target("pollute");
+    let out = std::env::temp_dir().join("sim_target_pollute_fixed.exe");
+
+    // Without rebase: the fixed dump must crash.
+    let mut doc = pe_rs::process::dump(pid).expect("dump paused target");
+    let resolver = pe_rs::process::ProcessResolver::for_process(pid).expect("resolver");
+    let scan = doc.scan(&resolver, &scan_for("pollute")).expect("scan");
+    doc.fix_iat(&scan, &resolver, &IatFixOptions::default())
+        .expect("fix");
+    std::fs::write(&out, pe_rs::io::pe::serialize(&doc).expect("serialize")).expect("write");
+    let crashed = Command::new(&out)
+        .arg("verify")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true);
+    assert!(crashed, "without rebase the polluted slot should crash");
+
+    // With rebase: the polluted slot is cleared and the fixed dump re-runs.
+    let mut doc = pe_rs::process::dump(pid).expect("dump paused target");
+    let report = pe_rs::feature::rebase_dump(&mut doc, 0x1_4000_0000).expect("rebase");
+    assert!(
+        report.cleared >= 1,
+        "expected the runtime-written slot to be cleared, got {report:?}"
+    );
+    let resolver = pe_rs::process::ProcessResolver::for_process(pid).expect("resolver");
+    let scan = doc.scan(&resolver, &scan_for("pollute")).expect("scan");
+    doc.fix_iat(&scan, &resolver, &IatFixOptions::default())
+        .expect("fix");
+    std::fs::write(&out, pe_rs::io::pe::serialize(&doc).expect("serialize")).expect("write");
+
+    let _ = target.kill();
+    let _ = target.wait();
+    let output = Command::new(&out)
+        .arg("verify")
+        .output()
+        .expect("run fixed");
+    assert!(
+        output.status.success(),
+        "with rebase the fixed dump must run, exited {}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SIM_TARGET_OK"), "no marker: {stdout}");
+    std::fs::remove_file(&out).ok();
 }

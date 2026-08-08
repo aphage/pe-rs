@@ -113,7 +113,9 @@ cargo build -p sim-target
 ./target/debug/sim-target.exe corrupt erased
 
 # 2. standalone pe dump tool: dump + fix + save (knows nothing about the target)
-cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code
+#    --rebase additionally rebuilds the base relocation table so a dump whose
+#    runtime wrote absolute pointers into .data re-runs
+cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code --rebase
 
 # 3. run the fixed dump
 ./fixed.exe verify          # -> SIM_TARGET_OK, exit 0
@@ -125,9 +127,10 @@ cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code
 | `oft` (B) | `OriginalFirstThunk` zeroed | `reflection` | ✓ |
 | `iatdir` (C) | Import directory erased, IAT kept | `reflection` | ✓ |
 | `erased` (D) | both erased + IAT scattered, code repointed | `code` | ✓ |
+| `pollute` | an external pointer written into a `.reloc`-covered `.data` slot | `code` | only with `--rebase` |
 
-The four scenarios are also driven automatically (spawn → pause → dump+fix →
-re-run, using pe-rs the way the standalone tool does):
+The scenarios are also driven automatically (spawn → pause → dump+fix → re-run,
+using pe-rs the way the standalone tool does):
 
 ```text
 cargo test -p sim-target -- --ignored
@@ -135,8 +138,12 @@ cargo test -p sim-target -- --ignored
 
 The target is `no_std` (no CRT, no heap) on purpose: `std` programs lazily write
 absolute function pointers into `.data`, so a dump of them can't re-run (the
-loader re-relocates those slots as if they were image pointers). A clean runtime
-behaves like a freshly-unpacked packed program. See `docs/simulation.md`.
+loader re-relocates those slots as if they were image pointers). `rebase_dump`
+fixes exactly that class — image-internal pointers are rebased to a preferred
+base, runtime-written external slots are cleared and dropped from the `.reloc`
+table (`crates/std-target` shows why a *full* std program still can't re-run:
+its `lang_start` init has more dump-sensitive state than rebase covers). See
+`docs/simulation.md`.
 
 ## Roadmap
 

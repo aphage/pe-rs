@@ -4,7 +4,7 @@
 //! point it at any pid, like Scylla's "Fix Dump".
 //!
 //! ```
-//! cargo run -p pe-rs --example dump -- <pid> [out] [--method resolver|reflection|code] [--no-validate]
+//! cargo run -p pe-rs --example dump -- <pid> [out] [--method resolver|reflection|code] [--no-validate] [--rebase [<base>]]
 //! ```
 //!
 //! `--method` picks the scan line (docs/dump 情况分析和处理.md): `resolver`
@@ -12,25 +12,36 @@
 //! OFT / cleared import directory, `code` for an erased + split IAT. `code`
 //! validates each referenced slot's content through the resolver by default;
 //! pass `--no-validate` for protected dumps whose slots do not resolve.
+//!
+//! `--rebase [<base>]` rewrites the dump's base relocation table so it re-runs
+//! standalone even when the program's runtime wrote absolute pointers into
+//! `.data` (see `pe_rs::feature::rebase_dump`). `<base>` defaults to
+//! `0x140000000`.
 
 use pe_rs::api::{IatFixer, IatScanner, PeViewer};
 use pe_rs::domain::{IatFixOptions, ScanMethod, ScanOptions};
+use pe_rs::feature::rebase_dump;
 use pe_rs::io::pe::serialize;
 use pe_rs::process;
 
+const DEFAULT_PREFERRED_BASE: u64 = 0x1_4000_0000; // 0x140000000, typical x64 exe base
+
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let pid = args
-        .next()
+        .first()
         .map(|s| s.parse::<u32>().expect("pid must be a u32"))
         .unwrap_or_else(std::process::id);
     let mut out: Option<String> = None;
     let mut method = ScanMethod::Resolver;
     let mut validate = true;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
+    let mut rebase: Option<u64> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
             "--method" => {
-                method = match args.next().as_deref() {
+                i += 1;
+                method = match args.get(i).map(|s| s.as_str()) {
                     Some("resolver") => ScanMethod::Resolver,
                     Some("reflection") => ScanMethod::Reflection,
                     Some("code") => ScanMethod::CodeReference,
@@ -45,16 +56,38 @@ fn main() {
                 };
             }
             "--no-validate" => validate = false,
+            "--rebase" => {
+                // Optional base value (default 0x140000000); an arg that isn't
+                // a number is the next positional, not a base.
+                rebase = match args.get(i + 1).and_then(|v| parse_base(v)) {
+                    Some(base) => {
+                        i += 1;
+                        Some(base)
+                    }
+                    None => Some(DEFAULT_PREFERRED_BASE),
+                };
+            }
             other if out.is_none() => out = Some(other.to_string()),
             other => {
                 eprintln!("unexpected argument '{other}'");
                 std::process::exit(2);
             }
         }
+        i += 1;
     }
-    if let Err(e) = run(pid, out.as_deref(), method, validate) {
+    if let Err(e) = run(pid, out.as_deref(), method, validate, rebase) {
         eprintln!("FAILED: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Parse a base like `0x140000000` or `1400000000` (decimal).
+fn parse_base(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u64>().ok()
     }
 }
 
@@ -63,6 +96,7 @@ fn run(
     out: Option<&str>,
     method: ScanMethod,
     validate: bool,
+    rebase: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut doc = process::dump(pid)?;
     println!(
@@ -71,6 +105,14 @@ fn run(
         doc.sections().len(),
         doc.imports().len(),
     );
+
+    if let Some(base) = rebase {
+        let report = rebase_dump(&mut doc, base)?;
+        println!(
+            "rebased dump to {base:#x}: {} image pointers, {} runtime slots cleared",
+            report.rebased, report.cleared
+        );
+    }
 
     let resolver = process::ProcessResolver::for_process(pid)?;
     println!("resolver: {} loaded modules", resolver.module_names().len());

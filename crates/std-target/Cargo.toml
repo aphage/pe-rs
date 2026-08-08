@@ -1,0 +1,14 @@
+[package]
+name = "std-target"
+description = "A plain std Rust program used to validate pe-rs's rebase_dump: its runtime pollutes .data, and with --rebase its dump re-runs standalone."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+pe-rs = { path = "../pe-rs" }

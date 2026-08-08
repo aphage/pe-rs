@@ -49,6 +49,31 @@ Scylla 类工具 attach 它并修复。
    `.bss` 尾巴里是运行时的陈旧堆/分配器状态;`serialize` 只写 `size_of_raw_data`
    那么长,让 loader 零填充尾巴,而不是把陈旧字节拷进修复产物。
 
+## 重定位修复(`rebase_dump`,重建 `.reloc`)
+
+运行期写进 `.data` 的绝对指针分两种:
+
+- **镜像内指针**(linker 在 `.reloc` 登记的、值指向镜像内):dump 后**无需动**——
+  二次重定位自洽(dump 值 = 实际基址 + rva,loader 再重定位得 `LoadBase + rva`)。
+- **运行期写的外部指针**(如 `GetProcAddress` 结果,但槽被 `.reloc` 覆盖):dump 保留
+  旧进程地址,新进程加载时 loader 照 `.reloc` 项再加一次重定位增量 → 变成垃圾。
+
+`pe_rs::feature::rebase_dump(doc, preferred_base)` 遍历 `DataDirectory[BaseReloc]`
+的每个槽,按值分类:
+
+- 值在 `[实际基址, 实际基址 + size_of_image)` 内 → 镜像内指针 → rebase 回
+  `preferred + (值 − actual)`,重定位项**保留**;
+- 值在范围外 → 运行期写的外部指针 → 槽**置零** + 重定位项**移除**(loader 不碰它,
+  运行期懒初始化看到空会重新解析);
+- 值为 0 或读不到 → 移除项、不动槽。
+
+然后 `set_image_base(preferred)`,并**重解析 TLS / LoadConfig 的富形态**(否则 writer
+会用旧的富形态重建出陈旧的目录)。dump 工具用 `--rebase [base]` 调用它。
+
+`pollute` 场景端到端验证它:目标把栈地址(不可执行的外部指针)写进 `.reloc` 覆盖的
+`.data` 槽并暂停;不 `--rebase` 的修复产物调用该槽 → 确定性崩溃;`--rebase` 清掉槽 +
+移除重定位项 → 产物懒重新解析并正常调用。
+
 ## 使用
 
 ```text
@@ -60,7 +85,8 @@ cargo build -p pe-rs --example dump
 ./target/debug/sim-target.exe corrupt erased
 
 # 2. 用独立的 pe dump 工具 dump + 修复 + 落盘(它只认 pid,不认识目标)
-cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code
+#    --rebase 重建 .reloc,处理运行期写进 .data 的绝对指针
+cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code --rebase
 
 # 3. 运行修复产物验证(打印 SIM_TARGET_OK,退出 0)
 ./fixed.exe verify
@@ -69,7 +95,7 @@ cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code
 taskkill /F /PID <pid>
 ```
 
-四场景自动验证(会 spawn 真实进程,忽略测试):
+四场景 + `pollute`(重定位修复验证)自动验证(会 spawn 真实进程,忽略测试):
 
 ```text
 cargo test -p sim-target -- --ignored
@@ -81,6 +107,8 @@ cargo test -p sim-target -- --ignored
 - `corrupt <scenario>`:按场景破坏自身内存后打印 `SIM_TARGET_READY:<pid>`,然后
   `SuspendThread(GetCurrentThread())` **挂起当前线程**(暂停,像调试器断点),直到
   dump 工具 dump 完用 `taskkill` 终止它。目标自毁后不再运行任何业务代码。
+- `corrupt pollute`:不破坏结构,只把一个外部指针(栈地址)写进 `.reloc` 覆盖的
+  `.data` 槽,用于端到端验证 `rebase_dump`(见上文)。
 
 `erased`(D)的拆散:每个模块的 FirstThunk 数组被拷进一个 `.data` 里的静态 scratch
 缓冲区,块与块之间留隙(非连续);然后目标程序用 opcode 模式扫描自己的 `.text`,
@@ -92,5 +120,10 @@ cargo test -p sim-target -- --ignored
 - 只针对 x64 宿主(`x86_64-pc-windows-msvc`);x86 绝对寻址的 `.reloc` 处理留作后续。
 - `sim-target` 的 bin 是 `no_std`,不能作为 `cargo test` 的测试目标构建
   (`[[bin]] test = false`),其端到端验证是 `#[ignore]` 的集成测试。
+- **完整 std 程序的 dump 仍无法独立再运行**(见 `crates/std-target`):即使做了
+  `--rebase`,Rust 运行时自身的 `lang_start` 初始化(TLS/分配器/panic 状态)也会在
+  重载后崩溃——那是远超"重建 `.reloc`"的运行时状态清理问题。`rebase_dump` 解决的是
+  `.reloc` 覆盖的运行期写指针这一类;`pollute` 场景在运行时干净的 `sim-target` 上
+  确定性验证它(不 rebase 崩、rebase 跑)。
 - 整个 workspace 设了 `panic = "abort"`(sim-target 无 unwinder);其余 crate 的
   测试失败因此以进程中止而非逐测 panic 呈现。

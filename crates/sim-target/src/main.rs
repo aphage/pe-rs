@@ -120,6 +120,7 @@ pub extern "C" fn __CxxFrameHandler3() -> i32 {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *const c_void;
+    fn GetProcAddress(module: *const c_void, name: *const u8) -> *mut c_void;
     fn GetCommandLineW() -> *const u16;
     fn GetStdHandle(kind: u32) -> *mut c_void;
     fn WriteFile(
@@ -150,6 +151,55 @@ const CURRENT_PROCESS: *mut c_void = usize::MAX as *mut c_void;
 static mut SCRATCH: [u64; SCRATCH_SLOTS] = [0xDEAD_CAFE_0000_0001; SCRATCH_SLOTS];
 const SCRATCH_SLOTS: usize = 2048;
 const GAP: usize = 8; // slots of padding between per-module scatter blocks
+
+// ---------------------------------------------------------------------------
+// Relocation-pollution demo (validates `pe_rs::feature::rebase_dump`).
+// ---------------------------------------------------------------------------
+
+/// A `.data` slot whose initializer points into the image, so the linker
+/// registers a relocation entry for it. The `pollute` scenario overwrites it
+/// with an *external* absolute pointer (GetProcAddress); `rebase_dump` clears
+/// it and drops the relocation entry, so a fixed dump re-runs.
+static DUMMY: u8 = 0xAA;
+static mut CACHED: *const u8 = &DUMMY;
+
+/// Resolve `kernel32!GetTickCount` (no heap).
+fn resolve_get_tick_count() -> *const u8 {
+    let k32: [u16; 13] = [
+        b'k' as u16,
+        b'e' as u16,
+        b'r' as u16,
+        b'n' as u16,
+        b'e' as u16,
+        b'l' as u16,
+        b'3' as u16,
+        b'2' as u16,
+        b'.' as u16,
+        b'd' as u16,
+        b'l' as u16,
+        b'l' as u16,
+        0,
+    ];
+    let module = unsafe { GetModuleHandleW(k32.as_ptr()) };
+    let name: [u8; 13] = *b"GetTickCount\0";
+    unsafe { GetProcAddress(module, name.as_ptr()) as *const u8 }
+}
+
+fn call_get_tick_count() -> u32 {
+    let f: unsafe extern "system" fn() -> u32 = unsafe { core::mem::transmute(CACHED) };
+    unsafe { f() }
+}
+
+/// Whether `ptr` points inside this image (an image pointer) — used by verify
+/// to tell an untouched `&DUMMY` slot from a runtime-written external pointer.
+fn ptr_in_image(ptr: *const u8) -> bool {
+    let base = base();
+    let pe_off = u32_at(base + 0x3c) as u64;
+    let opt = base + pe_off + 4 + 20;
+    let size_of_image = u32_at(opt + 56) as u64;
+    let p = ptr as u64;
+    p >= base && p < base + size_of_image
+}
 
 // ---------------------------------------------------------------------------
 // Console output (no std formatting).
@@ -530,6 +580,8 @@ pub extern "system" fn mainCRTStartup() -> ! {
             ("c", &b"iatdir"[..]),
             ("erased", &b"erased"[..]),
             ("d", &b"erased"[..]),
+            ("pollute", &b"pollute"[..]),
+            ("p", &b"pollute"[..]),
         ] {
             if tok_eq(&argv[2], name) {
                 scenario = Some(s);
@@ -548,6 +600,29 @@ pub extern "system" fn mainCRTStartup() -> ! {
 }
 
 fn run(out: &Out) -> ! {
+    // Relocation-pollution check (validates `rebase_dump`): the `pollute`
+    // scenario stores an external absolute pointer in a `.reloc`-covered slot.
+    // A fixed dump without rebase still holds that address, re-relocated into
+    // garbage — calling through it crashes. With rebase the slot is null, so
+    // lazily re-resolve and call through it.
+    let cached = unsafe { CACHED };
+    if !cached.is_null() && !ptr_in_image(cached) {
+        let tick = call_get_tick_count(); // no rebase: crashes on garbage
+        out.write_str("SIM_TARGET_OK reloc_tick=");
+        out.write_u32(tick);
+        out.write(b"\n");
+        unsafe { ExitProcess(0) }
+    } else if cached.is_null() {
+        unsafe {
+            CACHED = resolve_get_tick_count();
+        }
+        let tick = call_get_tick_count();
+        out.write_str("SIM_TARGET_OK reloc_tick=");
+        out.write_u32(tick);
+        out.write(b"\n");
+        unsafe { ExitProcess(0) }
+    }
+
     let pid = unsafe { GetCurrentProcessId() };
     let tick = unsafe { GetTickCount() };
     let mut sys = [0u16; 260];
@@ -575,6 +650,16 @@ fn corrupt(scenario: &[u8], out: &Out) -> ! {
         b"normal" => {}
         b"oft" => zero_oft(base, dirs),
         b"iatdir" => zero_dir(dirs, 1),
+        b"pollute" => {
+            // Store a non-executable *external* address (this stack frame) into
+            // a `.reloc`-covered slot. Re-running without rebase calls through
+            // it → it's not executable → deterministic crash. With rebase the
+            // slot is null and verify lazily re-resolves a real function.
+            let local = 0u8;
+            unsafe {
+                CACHED = &local as *const u8;
+            }
+        }
         b"erased" => {
             zero_dir(dirs, 1);
             zero_dir(dirs, 12);
