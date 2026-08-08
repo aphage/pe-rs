@@ -183,11 +183,22 @@ pub struct IatFixOptions {
     /// Rewrite the original IAT slots in place so they point at the newly
     /// built thunks (Scylla's "redirect IAT").
     pub redirect_iat: bool,
+    /// Rebuild the import table so each descriptor's `FirstThunk` array *is*
+    /// the original IAT slot run (when every module's slots are contiguous).
+    /// The loader then resolves the rebuilt names straight into the slots the
+    /// code references, which is what makes a fixed *dump* runnable as a
+    /// standalone file. When any module's slots are not contiguous (e.g. an
+    /// interleaved split IAT) the fixer falls back to pointing `FirstThunk` at
+    /// the new table's own IAT arrays.
+    pub reuse_iat_slots: bool,
 }
 
 impl Default for IatFixOptions {
     fn default() -> Self {
-        Self { redirect_iat: true }
+        Self {
+            redirect_iat: true,
+            reuse_iat_slots: true,
+        }
     }
 }
 
@@ -200,6 +211,11 @@ pub struct IatFixReport {
     pub total_entries: usize,
     /// Entries that could not be resolved to a module/function.
     pub unresolved: Vec<IatEntry>,
+    /// Whether the rebuilt descriptors' `FirstThunk` arrays were placed at the
+    /// original IAT slot RVAs (in-place, so the loader re-resolves imports into
+    /// the slots the code references). False when the fixer fell back to the
+    /// new table's own IAT arrays.
+    pub iat_reused: bool,
     /// RVA of the newly built import table, if any.
     pub new_import_rva: Option<Rva>,
     /// Size in bytes of the newly built import table.

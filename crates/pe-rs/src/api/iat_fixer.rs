@@ -67,24 +67,54 @@ impl IatFixer for PeDocument {
             ..IatFixReport::default()
         };
 
-        // Group resolved entries into import descriptors, first-seen order.
-        let (descriptors, unresolved) = group_resolved(&scan.entries, resolver);
+        // Group resolved entries into import descriptors, first-seen order,
+        // keeping the original slot RVA of every function (one function entry
+        // per slot, so the in-place FirstThunk arrays line up 1:1).
+        let (descriptors_with_slots, unresolved) =
+            group_resolved_with_slots(&scan.entries, resolver);
         report.unresolved = unresolved;
 
-        if descriptors.is_empty() {
+        if descriptors_with_slots.is_empty() {
             return Err(PeError::NotFound(
                 "fix_iat: no IAT entry could be resolved to an import".into(),
             ));
         }
 
-        let rebuilt = self.rebuild_import_table(&descriptors)?;
+        let descriptors: Vec<ImportDescriptor> = descriptors_with_slots
+            .iter()
+            .map(|(d, _)| d.clone())
+            .collect();
+        let psize = ptr_size(self.arch) as u32;
+
+        // In-place rebuild: when every module's slot run is contiguous, point
+        // each rebuilt descriptor's FirstThunk at the original slots so the
+        // loader resolves imports into the slots the code references — the
+        // shape that makes a fixed dump runnable. Otherwise fall back to the
+        // new table's own IAT arrays.
+        let contiguous = descriptors_with_slots
+            .iter()
+            .all(|(_, slots)| slots.windows(2).all(|w| w[1].get() == w[0].get() + psize));
+        let use_in_place = options.redirect_iat && options.reuse_iat_slots && contiguous;
+
+        let rebuilt = if use_in_place {
+            let slots: Vec<Vec<Rva>> = descriptors_with_slots
+                .iter()
+                .map(|(_, s)| s.clone())
+                .collect();
+            self.rebuild_import_table_in_place(&descriptors, &slots)?
+        } else {
+            self.rebuild_import_table(&descriptors)?
+        };
         report.imports_built = descriptors.len();
+        report.iat_reused = use_in_place;
         report.new_import_rva = Some(rebuilt.rva);
         report.new_import_size = rebuilt.size as usize;
 
         // Redirect: overwrite the original IAT slots with the new thunk values,
         // so code that calls through the old IAT still lands on a loader-fixable
-        // table. Only safe when every entry resolved.
+        // table. Only safe when every entry resolved. In the in-place case the
+        // rebuilt FirstThunk arrays already live at those slots; in the fallback
+        // case this repoints the old slots at the new table.
         if options.redirect_iat && report.unresolved.is_empty() {
             let psize = ptr_size(self.arch);
             for (k, entry) in scan.entries.iter().enumerate() {
@@ -95,6 +125,38 @@ impl IatFixer for PeDocument {
                     self.write(entry.rva, &(thunk as u32).to_le_bytes())?;
                 }
             }
+        }
+
+        // Runnable-dump guarantee: when the FirstThunk arrays could not be placed
+        // at the original slots (in-place requires each module's slots to be
+        // contiguous), rewrite every code reference from the old IAT slot to its
+        // new slot in the rebuilt table. The loader then resolves imports into
+        // the new IAT and the rewritten code calls through it — the fixed dump
+        // runs standalone even for scattered/noisy IAT layouts. The new slot of
+        // each function is read from the rebuilt descriptor's FirstThunk (the
+        // renderer interleaves INT/IAT arrays per module), so the remap always
+        // matches the actual layout.
+        if !use_in_place && options.redirect_iat && report.unresolved.is_empty() {
+            let psize = ptr_size(self.arch) as u32;
+            let mut mapping = Vec::with_capacity(scan.entries.len());
+            let mut fi = 0usize; // flattened function index into `scan.entries`
+            for (m, (desc, _)) in descriptors_with_slots.iter().enumerate() {
+                let desc_rva = rebuilt
+                    .rva
+                    .get()
+                    .checked_add(m as u32 * 20)
+                    .ok_or_else(|| PeError::InvalidArgument("descriptor RVA overflow".into()))?;
+                let desc_bytes = self.read(Rva(desc_rva), 20)?;
+                let ft = u32::from_le_bytes(desc_bytes[16..20].try_into().unwrap());
+                for k in 0..desc.functions.len() {
+                    let new_slot = ft.checked_add(k as u32 * psize).ok_or_else(|| {
+                        PeError::InvalidArgument("new IAT slot RVA overflow".into())
+                    })?;
+                    mapping.push((scan.entries[fi].rva, Rva(new_slot)));
+                    fi += 1;
+                }
+            }
+            self.remap_iat_references(&mapping)?;
         }
 
         Ok(report)
@@ -199,6 +261,37 @@ impl PeDocument {
         }
         Ok(out)
     }
+}
+
+/// Resolve raw IAT slots into per-module import descriptors, keeping the
+/// original slot RVA of every function (one function entry per slot, in slot
+/// order). Returns the `(descriptor, slots)` pairs plus the slots that could
+/// not be resolved.
+fn group_resolved_with_slots(
+    entries: &[IatEntry],
+    resolver: &dyn ImportResolver,
+) -> (Vec<(ImportDescriptor, Vec<Rva>)>, Vec<IatEntry>) {
+    let mut descriptors: Vec<(ImportDescriptor, Vec<Rva>)> = Vec::new();
+    let mut unresolved = Vec::new();
+    for entry in entries {
+        match resolver.resolve(entry.value) {
+            Some(ri) => match descriptors.iter_mut().find(|(d, _)| d.name == ri.module) {
+                Some((d, slots)) => {
+                    d.functions.push(ri.function.clone());
+                    slots.push(entry.rva);
+                }
+                None => descriptors.push((
+                    ImportDescriptor {
+                        name: ri.module.clone(),
+                        functions: vec![ri.function.clone()],
+                    },
+                    vec![entry.rva],
+                )),
+            },
+            None => unresolved.push(*entry),
+        }
+    }
+    (descriptors, unresolved)
 }
 
 /// Resolve raw IAT slots into per-module import descriptors, returning the

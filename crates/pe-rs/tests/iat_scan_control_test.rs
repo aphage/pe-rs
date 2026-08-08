@@ -364,6 +364,50 @@ fn control_erased_split_x86_iat_recovered() {
     assert_erased_split_recovers(Arch::Bit32);
 }
 
+/// `remap_iat_references` must repoint every code reference from the old
+/// contiguous IAT slots to scattered new slots, so the code-reference scan then
+/// recovers exactly the new slots. The document is built with the union of old
+/// and new slots so `.idata` covers both locations.
+#[test]
+fn remap_iat_references_repoints_code_to_scattered_slots() {
+    for arch in [Arch::Bit64, Arch::Bit32] {
+        let psize: u32 = if arch == Arch::Bit64 { 8 } else { 4 };
+        let old: Vec<u32> = (0..6)
+            .map(|i| IDATA_RVA + IAT_OFFSET_IN_IDATA as u32 + i * psize)
+            .collect();
+        let new_offsets = [0x40u32, 0xC0, 0x180, 0x1C0, 0x240, 0x2C0];
+        let new: Vec<u32> = new_offsets.iter().map(|&o| IDATA_RVA + o).collect();
+
+        let mut all = old.clone();
+        all.extend_from_slice(&new);
+        let mut doc = control_doc_with(arch, &all, false);
+        let mapping: Vec<(Rva, Rva)> = old
+            .iter()
+            .zip(&new)
+            .map(|(&o, &n)| (Rva(o), Rva(n)))
+            .collect();
+
+        let patched = doc.remap_iat_references(&mapping).expect("remap refs");
+        assert_eq!(patched, 6, "{arch:?}: every old reference rewritten");
+
+        let scan = doc
+            .scan(
+                &NoResolver,
+                &ScanOptions {
+                    method: ScanMethod::CodeReference,
+                    validate_slots: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let got: Vec<u32> = scan.entries.iter().map(|e| e.rva.get()).collect();
+        assert_eq!(
+            got, new,
+            "{arch:?}: code now references the scattered slots"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reflection shapes (docs/dump 情况分析和处理.md, the "相对正常的导入表"
 // branches): a dumped PE whose import directory the loader overwrote.

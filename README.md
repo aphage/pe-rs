@@ -36,7 +36,11 @@ array** addition. It is the library a future GUI PE editor will be built on
   loaded addresses, resolved through the resolver into names)
 - `IatFixer::fix_iat` — resolve IAT entries to `(module, function)`, rebuild the
   import directory (descriptors + INT/IAT arrays + name strings) and optionally
-  **redirect** the original IAT slots to the new thunks
+  **redirect** the original IAT slots to the new thunks. The rebuilt table is
+  placed **in place** at the original IAT slot RVAs when they are contiguous (so
+  the loader resolves imports into the slots the code references — the shape
+  that makes a fixed dump runnable); otherwise every code reference is rewritten
+  to the new table (`remap_iat_references`)
 - `IatFixer::add_iat_array` — manually feed a caller-supplied array of IAT
   entries and rebuild from it
 - `IatTable` / `IatFixer::fix_iat_table` — curate an IAT by hand: add
@@ -92,6 +96,32 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 }
 ```
 
+## Simulation test (dump → fix → re-run)
+
+`crates/sim-target` is a real, end-to-end simulation of the Scylla workflow: a
+minimal-runtime Windows executable that **corrupts its own in-memory PE image**
+per the scenarios of `docs/dump 情况分析和处理.md`, then a harness dumps it, runs
+the scan → fix pipeline, saves the rebuilt executable and **re-runs it** to prove
+the fixed dump is a working standalone PE.
+
+```text
+cargo build -p sim-target
+cargo run -p sim-target --example dump_sim -- --scenario <normal|oft|iatdir|erased> [--out fixed.exe]
+cargo test -p sim-target -- --ignored    # all four scenarios end-to-end
+```
+
+| scenario | in-memory corruption | scan | fixed dump runs |
+|---|---|---|---|
+| `normal` (A) | none | `CodeReference` | ✓ |
+| `oft` (B) | `OriginalFirstThunk` zeroed | `Reflection` | ✓ |
+| `iatdir` (C) | Import directory erased, IAT kept | `Reflection` | ✓ |
+| `erased` (D) | both erased + IAT scattered, code repointed | `CodeReference` | ✓ |
+
+The target is `no_std` (no CRT, no heap) on purpose: `std` programs lazily write
+absolute function pointers into `.data`, so a dump of them can't re-run (the
+loader re-relocates those slots as if they were image pointers). A clean runtime
+behaves like a freshly-unpacked packed program. See `docs/simulation.md`.
+
 ## Roadmap
 
 - [x] Phase 0–5 — scaffold, outer API + domain model, mock, contract tests, real parser/writer (round-trip stable)
@@ -104,6 +134,11 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 - [x] LoadConfig directory editing
 - [x] Section merging across non-contiguous ranges (RVA remap)
 - [x] Process dump + IAT resolution (`pe_rs::process`: `dump`, `ProcessResolver` — dump a live process and scan/fix its IAT; `with_fingerprints` resolves addresses in **memory-loaded** (manually mapped) modules by matching code against the system-loaded copy, for protectors that erase or split the IAT)
+- [x] Runnable fixed dumps (`fix_iat` rebuilds the import table in place at the
+  original IAT slot RVAs, or rewrites code references to the new table; the
+  writer preserves the raw/bss split so dumped uninitialized tails are
+  re-zeroed) + a **simulation test** (`crates/sim-target`: a self-corrupting
+  `no_std` target whose dump is fixed and re-run for all four dump scenarios)
 - [x] Process hooks / tracer (`pe_rs::process::tracer` — inline API hooks with
   trampoline forwarding, trace log readback, self-hook verified)
 - [ ] ScyllaHide (anti-anti-debug)

@@ -228,7 +228,7 @@ pub fn document() -> PeDocument {
             name: *b".rsrc\0\0\0",
             virtual_size: rsrc.len() as u32,
             virtual_address: Rva(MOCK_RSRC_RVA),
-            size_of_raw_data: 0x200,
+            size_of_raw_data: 0x400,
             pointer_to_raw_data: RawOffset(0x600),
             characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
         },

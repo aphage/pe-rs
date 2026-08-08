@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pe-rs", "crates/pe-rs-gui"]
+members = ["crates/pe-rs", "crates/pe-rs-gui", "crates/sim-target"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,3 +11,12 @@ repository = "https://github.com/aphage/pe-rs"
 
 [workspace.dependencies]
 thiserror = "2"
+
+# sim-target's bin is no_std (no unwinder available), so panics abort. The rest
+# of the workspace is unaffected functionally; test failures just report as a
+# process abort instead of a per-test panic message.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

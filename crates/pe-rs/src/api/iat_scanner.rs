@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use iced_x86::{Decoder, DecoderOptions, Instruction, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, Encoder, Instruction, OpKind, Register};
 
 use crate::api::resolver::ImportResolver;
 use crate::domain::data_directory::{DataDirectory, DataDirectoryIndex};
@@ -323,6 +323,98 @@ impl PeDocument {
             return Err(PeError::NotFound("image has no mappable data".into()));
         }
         Ok((Rva(s0), (e0 - s0) as usize))
+    }
+
+    /// Rewrite the direct-memory code references in the executable sections
+    /// whose target slot RVA is a key of `mapping` to point at the mapped new
+    /// slot RVA instead — the code side of relocating (scattering) an IAT.
+    /// After this, code that dereferenced the old slots dereferences the new
+    /// ones. Only the displacement is changed, so each rewritten instruction
+    /// keeps its byte length; an instruction whose re-encoding would change
+    /// length is left untouched (it would desynchronize the decoder). Returns
+    /// the number of instructions rewritten. On x64 the references are
+    /// RIP-relative (base-independent), so no `.reloc` entries are involved.
+    pub fn remap_iat_references(&mut self, mapping: &[(Rva, Rva)]) -> Result<usize> {
+        if mapping.is_empty() {
+            return Ok(0);
+        }
+        let map: HashMap<u32, u32> = mapping.iter().map(|&(o, n)| (o.get(), n.get())).collect();
+        let image_base = self.optional.image_base();
+        let bitness = match self.arch {
+            Arch::Bit64 => 64,
+            Arch::Bit32 => 32,
+        };
+        let mut patched = 0usize;
+
+        for si in 0..self.sections.len() {
+            let chars = self.sections[si].header.characteristics;
+            if chars & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE) == 0 {
+                continue;
+            }
+            let sec_start = self.sections[si].header.virtual_address.get();
+
+            // Pass 1: decode and re-encode the references to rewrite. Decoding
+            // borrows the section data, so collect the (offset, bytes) patches
+            // first and apply them afterwards.
+            let mut patches: Vec<(usize, Vec<u8>)> = Vec::new();
+            {
+                let data = &self.sections[si].data;
+                let mut decoder =
+                    Decoder::with_ip(bitness, data, sec_start as u64, DecoderOptions::NONE);
+                while decoder.can_decode() {
+                    let start = decoder.position();
+                    let insn = decoder.decode();
+                    if !is_iat_reference_insn(&insn) {
+                        continue;
+                    }
+                    let old_rva: u32 = if insn.is_ip_rel_memory_operand() {
+                        let t = insn.ip_rel_memory_address();
+                        if t > u32::MAX as u64 {
+                            continue;
+                        }
+                        t as u32
+                    } else if is_absolute_memory_operand(&insn) {
+                        let va = insn.memory_displacement64();
+                        if va < image_base || va - image_base > u32::MAX as u64 {
+                            continue;
+                        }
+                        (va - image_base) as u32
+                    } else {
+                        continue;
+                    };
+                    let Some(&new_rva) = map.get(&old_rva) else {
+                        continue;
+                    };
+
+                    let mut new_insn = insn;
+                    let target = if new_insn.is_ip_rel_memory_operand() {
+                        new_rva as u64
+                    } else {
+                        image_base + new_rva as u64
+                    };
+                    new_insn.set_memory_displacement64(target);
+                    let mut encoder = Encoder::new(bitness);
+                    let rip = sec_start as u64 + start as u64;
+                    if encoder.encode(&new_insn, rip).is_err() {
+                        continue;
+                    }
+                    let bytes = encoder.take_buffer();
+                    if bytes.len() != insn.len() {
+                        continue; // encoding changed length: would desync the section
+                    }
+                    patches.push((start, bytes));
+                }
+            }
+
+            // Pass 2: apply the rewritten instruction bytes.
+            let data = &mut self.sections[si].data;
+            for (start, bytes) in patches {
+                data[start..start + bytes.len()].copy_from_slice(&bytes);
+                patched += 1;
+            }
+        }
+
+        Ok(patched)
     }
 }
 

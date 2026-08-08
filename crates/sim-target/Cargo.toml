@@ -1,0 +1,28 @@
+[package]
+name = "sim-target"
+description = "Simulation target that corrupts its own in-memory PE per docs/dump scenarios, plus a harness that dumps, fixes and re-runs it — an end-to-end test for pe-rs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pe-rs = { path = "../pe-rs" }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+] }
+
+# The no_std bin can't be built as a test target (the test harness links std,
+# clashing with the panic handler). It has no unit tests anyway.
+[[bin]]
+name = "sim-target"
+path = "src/main.rs"
+test = false

@@ -216,11 +216,16 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
     let size_of_headers = align_up(head_end as u32, file_alignment);
     let size_of_image = align_up(image_end(&sections), section_alignment);
 
-    // Assign raw file offsets.
+    // Assign raw file offsets. Each section's raw length is capped at its
+    // declared `size_of_raw_data` when the document's data extends beyond it —
+    // the shape a *dump* produces (the section was read from memory up to its
+    // `virtual_size`, so the uninitialized tail carries live bytes). Capping
+    // makes the loader zero-fill that tail instead of copying stale process
+    // state, which is what lets a fixed dump run standalone.
     let mut raw_cursor = size_of_headers as usize;
     let mut raw_offsets = Vec::with_capacity(sections.len());
     for s in &sections {
-        let size = align_up(s.data.len() as u32, file_alignment) as usize;
+        let size = align_up(raw_len(s) as u32, file_alignment) as usize;
         raw_offsets.push((raw_cursor, size));
         raw_cursor += size;
     }
@@ -247,10 +252,23 @@ pub fn serialize(doc: &PeDocument) -> Result<Vec<u8>> {
         if out.len() < ptr {
             out.resize(ptr, 0);
         }
-        out.extend_from_slice(&s.data);
-        out.resize(out.len() + (size - s.data.len()), 0);
+        let cap = raw_len(s);
+        out.extend_from_slice(&s.data[..cap]);
+        out.resize(out.len() + (size - cap), 0);
     }
     Ok(out)
+}
+
+/// The number of section bytes to write to the file: the declared raw size
+/// when it is non-zero and shorter than the document's data (a dump's
+/// uninitialized tail), otherwise all of the data.
+fn raw_len(s: &Section) -> usize {
+    let raw = s.header.size_of_raw_data as usize;
+    if raw != 0 && raw < s.data.len() {
+        raw
+    } else {
+        s.data.len()
+    }
 }
 
 fn section_header_for(name: [u8; 8], rva: Rva, len: usize) -> SectionHeader {
