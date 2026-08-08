@@ -141,8 +141,10 @@ absolute function pointers into `.data`, so a dump of them can't re-run (the
 loader re-relocates those slots as if they were image pointers). `rebase_dump`
 fixes exactly that class — image-internal pointers are rebased to a preferred
 base, runtime-written external slots are cleared and dropped from the `.reloc`
-table (`crates/std-target` shows why a *full* std program still can't re-run:
-its `lang_start` init has more dump-sensitive state than rebase covers). See
+table. For *real* programs the correct dump moment is a debugger break at the
+entry point: `pe_rs::process::spawn_paused` creates a process paused there
+(fully loaded, nothing run — `cargo run -p pe-rs --example spawn_dump -- <exe>
+<out>`), which is verified clean (`rebase_dump` reports 0 runtime slots). See
 `docs/simulation.md`.
 
 ## Roadmap

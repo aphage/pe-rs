@@ -87,7 +87,6 @@ cargo build -p pe-rs --example dump
 # 2. 用独立的 pe dump 工具 dump + 修复 + 落盘(它只认 pid,不认识目标)
 #    --rebase 重建 .reloc,处理运行期写进 .data 的绝对指针
 cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code --rebase
-
 # 3. 运行修复产物验证(打印 SIM_TARGET_OK,退出 0)
 ./fixed.exe verify
 
@@ -115,15 +114,32 @@ cargo test -p sim-target -- --ignored
 把指向旧槽的 RIP-relative 引用位移改写指向 scratch 新槽。若改写不到任何引用,降级
 为"仅抹目录"(仍是有效的 D:结构全抹、靠代码引用定位 IAT)。
 
+## dump 的正确时机:在入口点暂停
+
+对真实程序,正确的 dump 时机是**调试器在 PE 入口点断下**——程序被系统完整加载
+(重定位、导入、TLS 就绪,`.data`/`.bss` 是初始状态),但还没执行任何程序代码。
+`pe_rs::process::spawn_paused(exe, args)` 用调试 API(`CreateProcessW` +
+`DEBUG_ONLY_THIS_PROCESS`)创建目标,在入口点写一个 `INT 3` 断点并一路继续,直到
+程序停在入口:返回 `PausedProcess`(Drop 时终止并分离调试器)。示例:
+
+```text
+cargo run -p pe-rs --example spawn_dump -- <exe> <out> [--method ...] [--rebase] [-- <args...>]
+```
+
+在这个状态下 dump,运行期懒写的外部指针**为零**(`rebase_dump` 报告
+`0 runtime slots cleared`)——印证了"入口点暂停"确实是干净的加载态。对**最小
+std 程序**(空 `main`)的 dump 也确实能再运行(重进 `main`)。
+
 ## 局限
 
 - 只针对 x64 宿主(`x86_64-pc-windows-msvc`);x86 绝对寻址的 `.reloc` 处理留作后续。
 - `sim-target` 的 bin 是 `no_std`,不能作为 `cargo test` 的测试目标构建
   (`[[bin]] test = false`),其端到端验证是 `#[ignore]` 的集成测试。
-- **完整 std 程序的 dump 仍无法独立再运行**(见 `crates/std-target`):即使做了
-  `--rebase`,Rust 运行时自身的 `lang_start` 初始化(TLS/分配器/panic 状态)也会在
-  重载后崩溃——那是远超"重建 `.reloc`"的运行时状态清理问题。`rebase_dump` 解决的是
-  `.reloc` 覆盖的运行期写指针这一类;`pollute` 场景在运行时干净的 `sim-target` 上
-  确定性验证它(不 rebase 崩、rebase 跑)。
+- **std 程序在入口点暂停下的 dump 能再运行**(空 `main` 已验证),但**只要 `main`
+  里做分配**(`Vec`/`args`/`println`),重载后会在分配器路径崩溃——分配失败后走到
+  panic 消息,那里有个函数指针在重载后指向 `.rdata` 字符串。这是 std 运行时的
+  dump 敏感状态(`crates/std-target` 复现);`rebase_dump` 解决的是 `.reloc` 覆盖的
+  运行期写指针这一类,`pollute` 场景在运行时干净的 `sim-target` 上确定性验证它
+  (不 rebase 崩、rebase 跑)。
 - 整个 workspace 设了 `panic = "abort"`(sim-target 无 unwinder);其余 crate 的
   测试失败因此以进程中止而非逐测 panic 呈现。

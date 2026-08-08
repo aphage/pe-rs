@@ -26,7 +26,7 @@ use crate::io::pe::parser::{
     parse_resources_from_doc, parse_section_headers, parse_tls_from_doc,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+use windows_sys::Win32::System::Diagnostics::Debug::{DebugActiveProcessStop, ReadProcessMemory};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
     Process32FirstW, Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
@@ -35,7 +35,7 @@ use windows_sys::Win32::System::ProcessStatus::{
     EnumProcessModules, GetModuleBaseNameW, GetModuleInformation, MODULEINFO,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, TerminateProcess,
 };
 
 fn open_process(pid: u32) -> Result<HANDLE> {
@@ -180,6 +180,189 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>> {
 pub fn dump(pid: u32) -> Result<PeDocument> {
     let (base, _size) = module_range(pid)?;
     dump_at(pid, base)
+}
+
+/// A process created with [`spawn_paused`]: fully loaded by the OS and paused at
+/// its **entry point**, before any of the program's own code has run — the ideal
+/// state to dump. Dropping the handle terminates the process and detaches the
+/// debugger.
+pub struct PausedProcess {
+    process: HANDLE,
+    thread: HANDLE,
+    pub pid: u32,
+    /// RVA of the entry point, whose byte was temporarily replaced by a
+    /// breakpoint while paused.
+    entry_rva: Option<u32>,
+    /// The original entry-point byte, to restore into the dump.
+    original_entry_byte: Option<u8>,
+}
+
+impl PausedProcess {
+    /// Restore the entry-point byte that was temporarily replaced by a
+    /// breakpoint, so a dump taken while paused at the entry has intact code.
+    pub fn restore_entry_byte(&self, doc: &mut PeDocument) -> Result<()> {
+        if let (Some(rva), Some(byte)) = (self.entry_rva, self.original_entry_byte) {
+            doc.write(Rva(rva), &[byte])?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PausedProcess {
+    fn drop(&mut self) {
+        unsafe {
+            TerminateProcess(self.process, 0);
+            DebugActiveProcessStop(self.pid);
+            CloseHandle(self.process);
+            CloseHandle(self.thread);
+        }
+    }
+}
+
+/// Create `exe` (with `args`) as a debuggee and wait until the OS loader has
+/// fully initialized it — image mapped, relocations applied, imports resolved,
+/// TLS set up, `.data`/`.bss` in their initial state — and it is paused at its
+/// **entry point**, before any program code has run. This is the clean, correct
+/// moment to dump (Scylla's "attach, break at entry, fix").
+///
+/// The debugger arms a breakpoint at the entry (`INT 3`); every earlier event
+/// (process creation, DLL loads, the loader's own attach break) is continued
+/// until that breakpoint. [`PausedProcess::restore_entry_byte`] puts the
+/// original entry byte back into a dump.
+pub fn spawn_paused(exe: &str, args: &[String]) -> Result<PausedProcess> {
+    use windows_sys::Win32::Foundation::{DBG_CONTINUE, EXCEPTION_BREAKPOINT};
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, EXCEPTION_DEBUG_EVENT,
+        WaitForDebugEvent, WriteProcessMemory,
+    };
+    use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtectEx};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DEBUG_ONLY_THIS_PROCESS, DEBUG_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let mut cmdline: Vec<u16> = exe.encode_utf16().collect();
+    for a in args {
+        cmdline.push(b' ' as u16);
+        cmdline.extend(a.encode_utf16());
+    }
+    cmdline.push(0);
+
+    let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            cmdline.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DEBUG_ONLY_THIS_PROCESS | DEBUG_PROCESS,
+            std::ptr::null(),
+            std::ptr::null(),
+            &si,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        return Err(PeError::Io(std::io::Error::last_os_error()));
+    }
+    let pid = pi.dwProcessId;
+    let process = pi.hProcess;
+    let thread = pi.hThread;
+
+    let mut entry_va: Option<u64> = None;
+    let mut entry_rva: Option<u32> = None;
+    let mut original_entry_byte: Option<u8> = None;
+    loop {
+        let mut ev: DEBUG_EVENT = unsafe { std::mem::zeroed() };
+        if unsafe { WaitForDebugEvent(&mut ev, 10_000) } == 0 {
+            break;
+        }
+        match ev.dwDebugEventCode {
+            CREATE_PROCESS_DEBUG_EVENT => {
+                let base = unsafe { ev.u.CreateProcessInfo.lpBaseOfImage } as u64;
+                // Compute the entry point VA from the main module's headers.
+                if let Ok(dos) = read_memory(pid, base, 64) {
+                    let pe_off = u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()) as u64;
+                    if let Ok(nt) = read_memory(pid, base + pe_off, 24 + 0x100) {
+                        let rva = u32::from_le_bytes(nt[40..44].try_into().unwrap());
+                        entry_rva = Some(rva);
+                        entry_va = Some(base + rva as u64);
+                    }
+                }
+                // Arm a breakpoint at the entry: save the original byte, write
+                // an `INT 3`, so the loader's remaining init runs and the
+                // process stops at the entry — loaded, but not run.
+                if let Some(va) = entry_va {
+                    let mut orig = [0u8; 1];
+                    let mut read = 0usize;
+                    let ok = unsafe {
+                        ReadProcessMemory(
+                            process,
+                            va as *const c_void,
+                            orig.as_mut_ptr() as *mut c_void,
+                            1,
+                            &mut read,
+                        )
+                    };
+                    if ok != 0 && read == 1 {
+                        original_entry_byte = Some(orig[0]);
+                        let mut old = 0u32;
+                        unsafe {
+                            VirtualProtectEx(
+                                process,
+                                va as *const c_void,
+                                1,
+                                PAGE_READWRITE,
+                                &mut old,
+                            );
+                            let cc = [0xCCu8];
+                            let mut written = 0usize;
+                            WriteProcessMemory(
+                                process,
+                                va as *const c_void,
+                                cc.as_ptr() as *const c_void,
+                                1,
+                                &mut written,
+                            );
+                            VirtualProtectEx(process, va as *const c_void, 1, old, &mut old);
+                        }
+                    }
+                }
+                unsafe { ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, DBG_CONTINUE) };
+            }
+            EXCEPTION_DEBUG_EVENT => {
+                let code = unsafe { ev.u.Exception.ExceptionRecord.ExceptionCode };
+                let addr = unsafe { ev.u.Exception.ExceptionRecord.ExceptionAddress } as u64;
+                if code == EXCEPTION_BREAKPOINT && Some(addr) == entry_va {
+                    // Paused at the entry point: fully loaded, nothing run.
+                    return Ok(PausedProcess {
+                        process,
+                        thread,
+                        pid,
+                        entry_rva,
+                        original_entry_byte,
+                    });
+                }
+                unsafe { ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, DBG_CONTINUE) };
+            }
+            _ => unsafe {
+                ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, DBG_CONTINUE);
+            },
+        }
+    }
+
+    // Failed to reach the entry point: clean up.
+    unsafe {
+        TerminateProcess(process, 0);
+        DebugActiveProcessStop(pid);
+        CloseHandle(process);
+        CloseHandle(thread);
+    }
+    Err(PeError::NotFound(
+        "paused process did not reach its entry point".into(),
+    ))
 }
 
 /// Build a [`PeDocument`] from **any** loaded module of a process (e.g. a DLL

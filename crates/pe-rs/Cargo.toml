@@ -20,6 +20,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_Security",
 ] }
 
 [dev-dependencies]
