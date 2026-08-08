@@ -98,24 +98,40 @@ fn fix_dump(path: &str) -> Result<(), pe_rs::PeError> {
 
 ## Simulation test (dump → fix → re-run)
 
-`crates/sim-target` is a real, end-to-end simulation of the Scylla workflow: a
-minimal-runtime Windows executable that **corrupts its own in-memory PE image**
-per the scenarios of `docs/dump 情况分析和处理.md`, then a harness dumps it, runs
-the scan → fix pipeline, saves the rebuilt executable and **re-runs it** to prove
-the fixed dump is a working standalone PE.
+`crates/sim-target` simulates the real Scylla workflow end-to-end: a
+minimal-runtime Windows executable **corrupts its own in-memory PE image** per
+the scenarios of `docs/dump 情况分析和处理.md`, then **pauses itself** (like a
+debugger break). A *standalone* pe dump tool (`pe-rs`'s `dump` example) then
+dumps the paused process, scans its IAT with the per-scenario method, fixes the
+imports, writes a rebuilt executable, and the fixed dump is **re-run** to prove
+it works standalone.
 
 ```text
 cargo build -p sim-target
-cargo run -p sim-target --example dump_sim -- --scenario <normal|oft|iatdir|erased> [--out fixed.exe]
-cargo test -p sim-target -- --ignored    # all four scenarios end-to-end
+
+# 1. start the target: corrupt per scenario, then pause (prints SIM_TARGET_READY:<pid>)
+./target/debug/sim-target.exe corrupt erased
+
+# 2. standalone pe dump tool: dump + fix + save (knows nothing about the target)
+cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code
+
+# 3. run the fixed dump
+./fixed.exe verify          # -> SIM_TARGET_OK, exit 0
 ```
 
-| scenario | in-memory corruption | scan | fixed dump runs |
+| scenario | in-memory corruption | scan (`--method`) | fixed dump runs |
 |---|---|---|---|
-| `normal` (A) | none | `CodeReference` | ✓ |
-| `oft` (B) | `OriginalFirstThunk` zeroed | `Reflection` | ✓ |
-| `iatdir` (C) | Import directory erased, IAT kept | `Reflection` | ✓ |
-| `erased` (D) | both erased + IAT scattered, code repointed | `CodeReference` | ✓ |
+| `normal` (A) | none | `code` | ✓ |
+| `oft` (B) | `OriginalFirstThunk` zeroed | `reflection` | ✓ |
+| `iatdir` (C) | Import directory erased, IAT kept | `reflection` | ✓ |
+| `erased` (D) | both erased + IAT scattered, code repointed | `code` | ✓ |
+
+The four scenarios are also driven automatically (spawn → pause → dump+fix →
+re-run, using pe-rs the way the standalone tool does):
+
+```text
+cargo test -p sim-target -- --ignored
+```
 
 The target is `no_std` (no CRT, no heap) on purpose: `std` programs lazily write
 absolute function pointers into `.data`, so a dump of them can't re-run (the

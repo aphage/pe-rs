@@ -1,7 +1,8 @@
 //! The simulation **target**: a minimal-runtime Windows executable (no CRT, no
 //! `std` runtime, no heap) that corrupts its own in-memory PE image on demand,
-//! reproducing the scenarios of `docs/dump 情况分析和处理.md`, then stays alive
-//! so a harness can dump, fix and re-run it.
+//! reproducing the scenarios of `docs/dump 情况分析和处理.md`, then **pauses
+//! itself** (like being stopped by a debugger) so a *standalone* pe dump tool
+//! (`cargo run -p pe-rs --example dump -- <pid> ...`) can dump and fix it.
 //!
 //! A deliberately minimal runtime matters: `std`/CRT programs lazily write
 //! absolute function pointers into `.data` at startup, so a dump of them can't
@@ -12,7 +13,8 @@
 //! - `sim-target` / `sim-target verify` — run normally, print `SIM_TARGET_OK`,
 //!   exit 0. This is what a *fixed* dump is launched with to prove it works.
 //! - `sim-target corrupt <scenario>` — corrupt self per scenario, print
-//!   `SIM_TARGET_READY:<pid>`, then sleep until killed.
+//!   `SIM_TARGET_READY:<pid>`, then suspend the current thread (paused, like a
+//!   debugger break) until terminated by the dump tool.
 //!
 //! Scenarios (`normal|oft|iatdir|erased`, aliases `a|b|c|d`):
 //! - `normal` (A): no corruption — a plain running process.
@@ -134,7 +136,8 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
     fn VirtualProtect(addr: *mut c_void, size: usize, new: u32, old: *mut u32) -> i32;
     fn FlushInstructionCache(process: *mut c_void, base: *const c_void, size: usize) -> i32;
-    fn Sleep(ms: u32);
+    fn SuspendThread(thread: *mut c_void) -> u32;
+    fn GetCurrentThread() -> *mut c_void;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -587,7 +590,15 @@ fn corrupt(scenario: &[u8], out: &Out) -> ! {
     out.write_str("SIM_TARGET_READY:");
     out.write_u32(pid);
     out.write(b"\n");
+
+    // Simulate being paused by a debugger: freeze this thread so a standalone
+    // pe dump tool reads a stable image. The target never runs again — a real
+    // dump tool attaches to the paused process, reads it, and terminates it.
+    unsafe {
+        SuspendThread(GetCurrentThread());
+    }
+    // Only reached if something resumes the thread; spin rather than busy-loop.
     loop {
-        unsafe { Sleep(1000) };
+        core::hint::spin_loop();
     }
 }

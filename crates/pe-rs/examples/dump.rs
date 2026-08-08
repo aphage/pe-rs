@@ -1,12 +1,20 @@
-//! Dump a live process, scan its IAT against the process's loaded modules, fix
-//! the imports, and (optionally) write the rebuilt file.
+//! The standalone **pe dump tool**: dump a process (typically a paused one),
+//! scan its IAT against the process's loaded modules with a chosen method, fix
+//! the imports and write the rebuilt file. It knows nothing about the target —
+//! point it at any pid, like Scylla's "Fix Dump".
 //!
 //! ```
-//! cargo run -p pe-rs --example dump -- [pid] [out.bin]   # default pid: this process
+//! cargo run -p pe-rs --example dump -- <pid> [out] [--method resolver|reflection|code] [--no-validate]
 //! ```
+//!
+//! `--method` picks the scan line (docs/dump 情况分析和处理.md): `resolver`
+//! (default) for a normal import directory, `reflection` for a loader-overwritten
+//! OFT / cleared import directory, `code` for an erased + split IAT. `code`
+//! validates each referenced slot's content through the resolver by default;
+//! pass `--no-validate` for protected dumps whose slots do not resolve.
 
 use pe_rs::api::{IatFixer, IatScanner, PeViewer};
-use pe_rs::domain::{IatFixOptions, ScanOptions};
+use pe_rs::domain::{IatFixOptions, ScanMethod, ScanOptions};
 use pe_rs::io::pe::serialize;
 use pe_rs::process;
 
@@ -16,14 +24,46 @@ fn main() {
         .next()
         .map(|s| s.parse::<u32>().expect("pid must be a u32"))
         .unwrap_or_else(std::process::id);
-    let out = args.next();
-    if let Err(e) = run(pid, out.as_deref()) {
+    let mut out: Option<String> = None;
+    let mut method = ScanMethod::Resolver;
+    let mut validate = true;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--method" => {
+                method = match args.next().as_deref() {
+                    Some("resolver") => ScanMethod::Resolver,
+                    Some("reflection") => ScanMethod::Reflection,
+                    Some("code") => ScanMethod::CodeReference,
+                    Some(other) => {
+                        eprintln!("unknown method '{other}' (resolver|reflection|code)");
+                        std::process::exit(2);
+                    }
+                    None => {
+                        eprintln!("--method needs a value");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--no-validate" => validate = false,
+            other if out.is_none() => out = Some(other.to_string()),
+            other => {
+                eprintln!("unexpected argument '{other}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    if let Err(e) = run(pid, out.as_deref(), method, validate) {
         eprintln!("FAILED: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(pid: u32, out: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    pid: u32,
+    out: Option<&str>,
+    method: ScanMethod,
+    validate: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut doc = process::dump(pid)?;
     println!(
         "dumped pid {pid}: arch={:?} sections={} imports={}",
@@ -35,19 +75,26 @@ fn run(pid: u32, out: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let resolver = process::ProcessResolver::for_process(pid)?;
     println!("resolver: {} loaded modules", resolver.module_names().len());
 
-    let scan = doc.scan(&resolver, &ScanOptions::default())?;
+    let scan = doc.scan(
+        &resolver,
+        &ScanOptions {
+            method,
+            validate_slots: validate,
+            ..Default::default()
+        },
+    )?;
     println!(
-        "IAT at {:#x}, {} entries",
+        "scan ({method:?}, validate_slots={validate}): {} IAT entries at {:#x}",
+        scan.entries.len(),
         scan.base_rva.get(),
-        scan.entries.len()
     );
 
     let report = doc.fix_iat(&scan, &resolver, &IatFixOptions::default())?;
     println!(
-        "fixed: {} imports built, {} unresolved, new table at {:#x}",
+        "fixed: {} imports built, {} unresolved, in-place={}",
         report.imports_built,
         report.unresolved.len(),
-        report.new_import_rva.map(|r| r.get()).unwrap_or(0),
+        report.iat_reused,
     );
 
     let bytes = serialize(&doc)?;

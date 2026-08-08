@@ -1820,7 +1820,6 @@ name = "sim-target"
 version = "0.1.0"
 dependencies = [
  "pe-rs",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
