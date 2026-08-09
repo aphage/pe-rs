@@ -2,17 +2,16 @@
 //!
 //! The workflow is process-oriented (Scylla benchmark): pick a process (and
 //! optionally one of its loaded modules), dump its image into a
-//! [`PeDocument`], scan the IAT with the chosen method, curate the entries,
-//! fix the imports and save the rebuilt dump. An existing dump file can also be
-//! opened and scanned against a process's loaded modules. This is not a PE
-//! *editor* — the disk-editing side lives in `pe-edit-gui`.
+//! [`PeDocument`], then drive the Scylla interaction model — an **OEP** field,
+//! an **IAT address/size** (typed by hand or filled by Scan IAT), **Get Imports**
+//! resolves the live process's IAT into a per-module import tree (✓ valid /
+//! ? suspect / ✗ invalid), the tree is curated, and **Fix Dump** rebuilds the
+//! imports from it (writing the OEP). An existing dump file can also be opened.
 
 use eframe::egui;
-use pe_edit::domain::{
-    IatEntry, IatFixOptions, IatFixReport, IatScan, IatTable, Rva, ScanMethod, ScanOptions,
-};
+use pe_edit::domain::{IatFixOptions, IatFixReport, IatScan, ScanMethod, ScanOptions};
 use pe_edit::io::pe::{parse, serialize};
-use pe_scylla::api::{IatFixer, IatScanner};
+use pe_scylla::api::{IatScanner, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports};
 use pe_scylla::process::{self, ModuleInfo, ProcessInfo, ProcessResolver};
 use std::sync::mpsc;
 
@@ -71,6 +70,15 @@ fn scan_method_name(m: ScanMethod) -> &'static str {
     }
 }
 
+/// Status glyph for an import-tree entry.
+fn status_glyph(s: ImportStatus) -> &'static str {
+    match s {
+        ImportStatus::Valid => "✓",
+        ImportStatus::Suspect => "?",
+        ImportStatus::Invalid => "✗",
+    }
+}
+
 /// Read-only summary of the current document, for the toolbar.
 fn summary(doc: &pe_edit::domain::PeDocument) -> String {
     let imports: usize = doc.imports.iter().map(|d| d.functions.len()).sum();
@@ -85,6 +93,21 @@ fn summary(doc: &pe_edit::domain::PeDocument) -> String {
         doc.sections.len(),
         imports,
     )
+}
+
+/// Parse a hex or decimal string into a `u64` (`None` when empty or invalid).
+fn parse_hex64(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        u64::from_str_radix(s, 16)
+            .or_else(|_| s.parse::<u64>())
+            .ok()
+    }
 }
 
 /// Where the current document came from — drives Save behaviour and the
@@ -114,18 +137,19 @@ struct ScyllaGui {
     /// to write once the user force-saves a possibly-broken import table.
     save_warning: Option<String>,
     pending_save_path: Option<String>,
-    /// Curated IAT entries (scan result + hand-added regions) with one keep
-    /// flag per entry — uncheck to drop a false positive before fixing.
-    iat_entries: Vec<IatEntry>,
-    iat_keep: Vec<bool>,
-    /// "Add region" / "Add entry" input state for the IAT page.
-    iat_region_rva: u32,
-    iat_region_size: u32,
-    iat_add_rva: u32,
-    iat_add_value: u64,
     /// Scan method used by "Scan IAT" (Resolver / Code references /
     /// Reflection — see `ScanMethod`).
     scan_method: ScanMethod,
+    /// Scylla fields: original entry point (RVA) and the IAT address (VA) /
+    /// size (bytes), typed by hand or filled by Scan IAT.
+    oep: String,
+    iat_va: String,
+    iat_size: String,
+    /// The Get Imports result: a curated per-module import tree.
+    tree: Option<ImportsTree>,
+    /// One "keep" flag per tree entry (flattened module → entry order);
+    /// uncheck to drop the entry from Fix Dump.
+    tree_keep: Vec<bool>,
     status: String,
     /// Pending async "open file" dialog result.
     pick_rx: Option<mpsc::Receiver<PickResult>>,
@@ -142,11 +166,15 @@ struct ScyllaGui {
 }
 
 impl ScyllaGui {
-    fn load_file(&mut self) {
+    fn clear_iat(&mut self) {
         self.scan = None;
-        self.iat_entries.clear();
-        self.iat_keep.clear();
+        self.tree = None;
+        self.tree_keep.clear();
         self.last_fix = None;
+    }
+
+    fn load_file(&mut self) {
+        self.clear_iat();
         match std::fs::read(&self.path) {
             Ok(bytes) => match parse(&bytes) {
                 Ok(doc) => {
@@ -163,26 +191,30 @@ impl ScyllaGui {
     /// Dump a process's main module (`base: None`) or one of its loaded
     /// modules (`base: Some`) into the working image, replacing the current one.
     fn dump_module_at(&mut self, pid: u32, base: Option<u64>, label: &str) {
-        self.scan = None;
-        self.iat_entries.clear();
-        self.iat_keep.clear();
-        self.last_fix = None;
+        self.clear_iat();
         let dumped = match base {
             Some(base) => process::dump_module(pid, base),
             None => process::dump(pid),
         };
         match dumped {
             Ok(doc) => {
+                let entry = doc.optional.address_of_entry_point().get();
                 self.resolver = ProcessResolver::for_process(pid).ok();
                 self.doc = Some(doc);
                 self.source = Source::Dump;
                 self.dump_label = label.to_string();
+                // Pre-fill the OEP field with the dumped entry point (RVA).
+                if self.oep.is_empty() {
+                    self.oep = format!("{entry:#x}");
+                }
                 self.status = format!("dumped {label} (pid {pid})");
             }
             Err(e) => self.status = format!("dump failed: {e}"),
         }
     }
 
+    /// Scan the dumped image's IAT with the chosen method and fill the IAT
+    /// address/size fields with the result (Scylla's "find the IAT first").
     fn scan_iat(&mut self) {
         let Some(doc) = self.doc.as_ref() else {
             self.status = "no document".into();
@@ -199,8 +231,10 @@ impl ScyllaGui {
         };
         match doc.scan(resolver, &opts) {
             Ok(scan) => {
-                self.iat_entries = scan.entries.clone();
-                self.iat_keep = vec![true; scan.entries.len()];
+                let psize = pe_edit::domain::types::ptr_size(doc.arch);
+                let base_va = resolver.image_base;
+                self.iat_va = format!("{:#x}", base_va + scan.base_rva.get() as u64);
+                self.iat_size = format!("{:#x}", scan.entries.len() * psize);
                 self.status = format!(
                     "scan ({}) — IAT at {:#x}, {} entries",
                     scan_method_name(method),
@@ -216,29 +250,68 @@ impl ScyllaGui {
         }
     }
 
-    fn fix_iat(&mut self) {
-        let resolver = match self.resolver.as_ref() {
-            Some(r) => r,
-            None => {
-                self.status = "no process resolver".into();
-                return;
-            }
+    /// Scylla's "Get Imports": read the live process's IAT at the address/size
+    /// fields and resolve it into the import tree.
+    fn get_imports(&mut self) {
+        let (Some(resolver), Some(_doc)) = (self.resolver.as_ref(), self.doc.as_ref()) else {
+            self.status = "no process — dump a process first".into();
+            return;
         };
-        let scan = match self.scan.as_ref() {
-            Some(s) => s,
-            None => {
-                self.status = "no IAT scan".into();
-                return;
-            }
+        let pid = self.pid.parse::<u32>().unwrap_or(0);
+        let Some(iat_va) = parse_hex64(&self.iat_va) else {
+            self.status = "invalid IAT address".into();
+            return;
         };
-        let doc = match self.doc.as_mut() {
-            Some(d) => d,
-            None => {
-                self.status = "no document".into();
-                return;
-            }
+        let Some(iat_size) = parse_hex64(&self.iat_size).map(|v| v as usize) else {
+            self.status = "invalid IAT size".into();
+            return;
         };
-        match doc.fix_iat(scan, resolver, &IatFixOptions::default()) {
+        // An IAT size of 0 means "a few pointers" — default to 0x100 bytes.
+        let iat_size = if iat_size == 0 { 0x100 } else { iat_size };
+        match get_imports(pid, resolver, iat_va, iat_size) {
+            Ok(tree) => {
+                let n = tree.total();
+                self.tree_keep = vec![true; n];
+                self.status = format!(
+                    "get imports — {} imports ({} valid, {} suspect, {} invalid)",
+                    tree.total(),
+                    tree.valid(),
+                    tree.suspect(),
+                    tree.invalid(),
+                );
+                self.tree = Some(tree);
+            }
+            Err(e) => {
+                self.status = format!("get imports failed: {e}");
+                self.tree = None;
+                self.tree_keep.clear();
+            }
+        }
+    }
+
+    /// Scylla's "Fix Dump": rebuild the imports in the dumped image from the
+    /// curated tree, writing the OEP field when set.
+    fn fix_dump(&mut self) {
+        let Some(tree) = self.tree.as_ref() else {
+            self.status = "no import tree — Get Imports first".into();
+            return;
+        };
+        let Some(doc) = self.doc.as_mut() else {
+            self.status = "no document".into();
+            return;
+        };
+        // Apply the keep flags: unchecked entries are dropped (invalidated).
+        let mut fixed = tree.clone();
+        let mut keep = self.tree_keep.iter();
+        for m in &mut fixed.modules {
+            for e in &mut m.entries {
+                if keep.next() == Some(&false) {
+                    e.status = ImportStatus::Invalid;
+                }
+            }
+        }
+        let oep = parse_hex64(&self.oep).map(|v| v as u32);
+        match fix_iat_from_tree(doc, &fixed, &IatFixOptions::default(), oep) {
             Ok(report) => {
                 self.last_fix = Some(report.clone());
                 self.status = format!(
@@ -463,13 +536,13 @@ impl eframe::App for ScyllaGui {
         });
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            if self.doc.is_some() {
-                self.show_iat(ui);
-            } else {
+            if self.doc.is_none() {
                 ui.centered_and_justified(|ui| {
                     ui.label("Dump a process (File → 选择进程…) or open a PE file to begin.");
                 });
+                return;
             }
+            self.show_workflow(ui);
         });
 
         // Process picker: a separate native window, detached from the main
@@ -671,158 +744,112 @@ impl eframe::App for ScyllaGui {
 }
 
 impl ScyllaGui {
-    fn show_iat(&mut self, ui: &mut egui::Ui) {
-        // Scan controls.
+    /// The Scylla workflow: IAT info fields + Get Imports tree + Fix Dump.
+    fn show_workflow(&mut self, ui: &mut egui::Ui) {
+        let has_resolver = self.resolver.is_some();
         ui.horizontal(|ui| {
-            ui.label("Method:").on_hover_text(
-                "Resolver: values that resolve via the process modules\n\
-                 Code references: disassemble code sections for direct memory operands\n\
-                 Reflection: recover the IAT from the PE structure (overwritten OriginalFirstThunk / IAT directory)",
-            );
-            let mut method_changed = false;
+            ui.label("OEP:");
+            ui.add(egui::TextEdit::singleline(&mut self.oep).desired_width(90.0))
+                .on_hover_text("Original entry point (RVA) written by Fix Dump");
+            ui.label("IAT VA:");
+            ui.add(egui::TextEdit::singleline(&mut self.iat_va).desired_width(120.0))
+                .on_hover_text("IAT address (VA) in the target process");
+            ui.label("IAT Size:");
+            ui.add(egui::TextEdit::singleline(&mut self.iat_size).desired_width(80.0))
+                .on_hover_text("IAT size in bytes");
+
+            ui.separator();
+            ui.label("Method:");
             egui::ComboBox::from_id_salt("scan_method")
                 .selected_text(scan_method_name(self.scan_method))
                 .show_ui(ui, |ui| {
-                    method_changed |= ui
-                        .selectable_value(&mut self.scan_method, ScanMethod::Resolver, "Resolver")
-                        .changed();
-                    method_changed |= ui
-                        .selectable_value(
-                            &mut self.scan_method,
-                            ScanMethod::CodeReference,
-                            "Code references",
-                        )
-                        .changed();
-                    method_changed |= ui
-                        .selectable_value(
-                            &mut self.scan_method,
-                            ScanMethod::Reflection,
-                            "Reflection",
-                        )
-                        .changed();
+                    for (m, name) in [
+                        (ScanMethod::Resolver, "Resolver"),
+                        (ScanMethod::CodeReference, "Code references"),
+                        (ScanMethod::Reflection, "Reflection"),
+                    ] {
+                        ui.selectable_value(&mut self.scan_method, m, name);
+                    }
                 });
-            // A scan is only meaningful for the method that produced it.
-            if method_changed {
-                self.scan = None;
-            }
-            if ui.button("Scan IAT").clicked() {
+            if ui
+                .add_enabled(has_resolver, egui::Button::new("Scan IAT"))
+                .on_hover_text("Scan the dumped image to find the IAT; fills IAT VA/Size")
+                .clicked()
+            {
                 self.scan_iat();
             }
-            if ui.button("Fix IAT").clicked() {
-                self.fix_iat();
+            if ui
+                .add_enabled(has_resolver, egui::Button::new("Get Imports"))
+                .on_hover_text("Resolve the live process's IAT into the import tree")
+                .clicked()
+            {
+                self.get_imports();
+            }
+            if ui
+                .add_enabled(self.tree.is_some(), egui::Button::new("Fix Dump"))
+                .on_hover_text("Rebuild the imports in the dumped image from the tree")
+                .clicked()
+            {
+                self.fix_dump();
             }
         });
         ui.separator();
 
-        let Some(doc) = self.doc.as_mut() else { return };
-        let resolver = self.resolver.as_ref();
-        let status = &mut self.status;
-        let entries = &mut self.iat_entries;
-        let keep = &mut self.iat_keep;
-        let last_fix = &mut self.last_fix;
-        let mut region_rva = self.iat_region_rva;
-        let mut region_size = self.iat_region_size;
-        let mut add_rva = self.iat_add_rva;
-        let mut add_value = self.iat_add_value;
-
-        if entries.is_empty() {
-            ui.label("Dump a process, then Scan IAT to curate the table here.");
-            return;
+        match &self.tree {
+            None => {
+                if self.scan.is_some() {
+                    ui.label(
+                        "IAT found — set IAT VA/Size (or keep the scan result) and click Get Imports.",
+                    );
+                } else {
+                    ui.label("Dump a process, find the IAT (Scan IAT or type IAT VA/Size), then Get Imports.");
+                }
+            }
+            Some(tree) => show_tree(ui, tree, &mut self.tree_keep),
         }
-
-        let kept = entries.iter().zip(keep.iter()).filter(|(_, k)| **k).count();
-        ui.label(format!(
-            "IAT — {} entries, {} kept (uncheck to drop false positives)",
-            entries.len(),
-            kept
-        ));
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("iat")
-                .num_columns(4)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("#");
-                    ui.label("RVA");
-                    ui.label("Value");
-                    ui.label("Keep");
-                    ui.end_row();
-                    for (i, (e, k)) in entries.iter().zip(keep.iter_mut()).enumerate() {
-                        ui.label(format!("{i}"));
-                        ui.label(format!("{:#x}", e.rva.get()));
-                        ui.label(format!("{:#x}", e.value));
-                        ui.checkbox(k, "");
-                        ui.end_row();
-                    }
-                });
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Add region (RVA, size):");
-            ui.add(egui::DragValue::new(&mut region_rva).hexadecimal(8, false, true));
-            ui.add(egui::DragValue::new(&mut region_size));
-            if ui.button("Add region").clicked() {
-                let mut t = IatTable::new();
-                match t.add_region(doc, Rva(region_rva), region_size as usize) {
-                    Ok(()) => {
-                        let added = t.entries().to_vec();
-                        let n = added.len();
-                        entries.extend(added);
-                        keep.extend(std::iter::repeat_n(true, n));
-                        *status = format!("added {n} entries from region {:#x}", region_rva);
-                    }
-                    Err(e) => *status = format!("add region failed: {e}"),
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Add entry (RVA, value):");
-            ui.add(egui::DragValue::new(&mut add_rva).hexadecimal(8, false, true));
-            ui.add(egui::DragValue::new(&mut add_value).hexadecimal(16, false, true));
-            if ui.button("Add entry").clicked() {
-                entries.push(IatEntry {
-                    rva: Rva(add_rva),
-                    value: add_value,
-                });
-                keep.push(true);
-                *status = format!("added entry {:#x} = {:#x}", add_rva, add_value);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.separator();
-            if ui.button("Fix curated table").clicked() {
-                let Some(resolver) = resolver else {
-                    *status = "no process resolver".into();
-                    return;
-                };
-                let kept: Vec<IatEntry> = entries
-                    .iter()
-                    .zip(keep.iter())
-                    .filter(|(_, k)| **k)
-                    .map(|(e, _)| *e)
-                    .collect();
-                if kept.is_empty() {
-                    *status = "no entries kept".into();
-                    return;
-                }
-                let table = IatTable::from_entries(kept);
-                match doc.fix_iat_table(&table, resolver, &IatFixOptions::default()) {
-                    Ok(report) => {
-                        *last_fix = Some(report.clone());
-                        *status = format!(
-                            "fixed {} imports ({} unresolved, new table at {:#x})",
-                            report.imports_built,
-                            report.unresolved.len(),
-                            report.new_import_rva.map(|r| r.get()).unwrap_or(0),
-                        );
-                    }
-                    Err(e) => *status = format!("fix curated failed: {e}"),
-                }
-            }
-        });
-
-        self.iat_region_rva = region_rva;
-        self.iat_region_size = region_size;
-        self.iat_add_rva = add_rva;
-        self.iat_add_value = add_value;
     }
+}
+
+/// Render the curated import tree (module → entries with keep flags).
+fn show_tree(ui: &mut egui::Ui, tree: &ImportsTree, keep: &mut [bool]) {
+    ui.label(format!(
+        "{} imports — {} valid, {} suspect, {} invalid (uncheck to drop)",
+        tree.total(),
+        tree.valid(),
+        tree.suspect(),
+        tree.invalid(),
+    ));
+    egui::ScrollArea::vertical()
+        .id_salt("imports_tree")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            let mut keep_iter = keep.iter_mut();
+            for module in &tree.modules {
+                let kept = module
+                    .entries
+                    .iter()
+                    .filter(|e| e.status != ImportStatus::Invalid)
+                    .count();
+                egui::CollapsingHeader::new(format!(
+                    "{}  ({} entries, {} kept)  first_thunk {:#x}",
+                    module.name,
+                    module.entries.len(),
+                    kept,
+                    module.first_thunk,
+                ))
+                .id_salt((&module.name, module.first_thunk))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for entry in &module.entries {
+                        ui.horizontal(|ui| {
+                            let k = keep_iter.next().unwrap();
+                            ui.checkbox(k, "");
+                            ui.label(status_glyph(entry.status));
+                            ui.monospace(format!("{:#x}", entry.slot_rva));
+                            ui.label(entry.label());
+                        });
+                    }
+                });
+            }
+        });
 }

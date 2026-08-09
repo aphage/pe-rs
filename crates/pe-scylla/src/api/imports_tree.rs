@@ -116,7 +116,31 @@ pub fn get_imports(
         return Err(PeError::InvalidArgument("get_imports: empty IAT".into()));
     }
     let psize = ptr_size(resolver.target_arch());
-    let bytes = read_memory(pid, iat_va, iat_size)?;
+    // Read the IAT in page-sized chunks, stopping at the first unreadable page
+    // (like Scylla's `readMemoryPartlyFromProcess`): the caller's size may
+    // overrun into guard/stack pages, and a real IAT ends at a NULL terminator
+    // anyway.
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut off = 0usize;
+    while off < iat_size {
+        let chunk = (iat_size - off).min(0x1000);
+        match read_memory(pid, iat_va + off as u64, chunk) {
+            Ok(mut part) => {
+                let n = part.len();
+                bytes.append(&mut part);
+                if n < chunk {
+                    break; // partial page: nothing readable past here
+                }
+            }
+            Err(_) => break,
+        }
+        off += chunk;
+    }
+    if bytes.len() < psize {
+        return Err(PeError::NotFound(
+            "get_imports: could not read the IAT from the process".into(),
+        ));
+    }
 
     let mut modules: Vec<ImportModule> = Vec::new();
     let mut unknown: Vec<ImportEntry> = Vec::new();
