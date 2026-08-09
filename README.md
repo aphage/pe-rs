@@ -54,6 +54,38 @@ cargo run -p pe-scylla-cli -- <pid> fixed.exe --method code --rebase
   (fully loaded, nothing run) — the clean, correct moment to dump.
 - `process::tracer` — inline API-hook tracing.
 
+### Scylla interaction model (Get Imports / Fix Dump)
+
+The GUI (and `pe-scylla-cli`'s `get-imports` / `fix-tree`) drive Scylla's
+interaction model end-to-end:
+
+- **OEP / IAT address+size fields** (typed or filled by `Scan IAT` /
+  **IAT Autosearch** — `process::search_iat` disassembles the live process
+  from the OEP, finds a resolving call/jmp slot, and derives the IAT
+  start/size; `--advanced` disassembles the whole executable region).
+- **Get Imports** — `get_imports(pid, resolver, iat_va, iat_size)` reads the
+  live IAT and resolves every thunk into a per-module tree with **valid /
+  suspect / invalid** status. `ProcessResolver` scores duplicate exports
+  (kernel32 high priority; `EncodePointer`/`DecodePointer`-style aliases are
+  flagged suspect).
+- **Fix Dump from tree** — `fix_iat_from_tree(doc, tree, options, oep)`
+  rebuilds the dump's imports from the curated tree and writes the OEP.
+  `IatFixOptions` gains `write_oft` (OriginalFirstThunk) and
+  `new_iat_in_section`.
+- **Direct imports** (`api::direct_imports`) — scan for `call`/`jmp` that
+  target an API directly (not through the IAT), add them as imports, and route
+  them through a jump table (`build_direct_import_jump_table` +
+  `patch_direct_imports_to_jump_table`).
+- **Process** — `suspend`/`resume` (dump without racing the target),
+  `dump_memory(pid, va, size)`, `dump_section(pid, index)`,
+  `dump_with_oep(pid, oep)`.
+- **Save/Load import tree** (`io::tree`) — the curated tree + OEP/IAT metadata
+  as **XML or JSON**.
+- **PE Rebuild** (`feature::pe_rebuild`) — realign a disk PE, optionally drop
+  the DOS stub / update the checksum / keep a `.bak`.
+- **GUI** — process picker, imports tree with status icons, a log panel, an
+  Options dialog (suspend / advanced search), and a Disassembler view.
+
 ## pe-edit: edit a disk PE file
 
 The CFF-Explorer paradigm. A PE file is parsed into a rich `PeDocument`
@@ -151,5 +183,10 @@ cargo fmt --check
 ## Roadmap
 
 - [x] Two-paradigm split (this reorg): pe-edit (disk edit) + pe-scylla (process dump), each CLI + GUI
+- [x] pe-scylla aligned with Scylla: OEP/IAT fields, Get Imports tree (valid/suspect/invalid),
+      API scoring, IAT autosearch, suspend/resume, dump memory/section, fix options
+      (OFT, new IAT in section, direct imports), save/load tree (XML+JSON), PE rebuild,
+      GUI log/options/disassembler
 - [ ] pe-edit: memory-view (4K) / disk-view (512) toggle in the editor (CFF Explorer File/Memory dual view)
-- [ ] pe-scylla / pe-edit: per-tool feature pass, one git commit per feature
+- [ ] pe-scylla: auto-trace to find OEP/IAT (Scylla AutoTrace); per-tool feature pass,
+      one git commit per feature
