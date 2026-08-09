@@ -7,7 +7,10 @@
 //! `(module, function)` so the IAT scanner / fixer can operate on the dump.
 //! [`tracer`] installs inline API hooks to trace calls in a target process.
 
+pub mod iat_search;
 pub mod tracer;
+
+pub use iat_search::search_iat;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -30,12 +33,14 @@ use windows_sys::Win32::System::Diagnostics::Debug::{DebugActiveProcessStop, Rea
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
     Process32FirstW, Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
+    TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::ProcessStatus::{
     EnumProcessModules, GetModuleBaseNameW, GetModuleInformation, MODULEINFO,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, TerminateProcess,
+    OpenProcess, OpenThread, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, ResumeThread,
+    SuspendThread, THREAD_SUSPEND_RESUME, TerminateProcess,
 };
 
 fn open_process(pid: u32) -> Result<HANDLE> {
@@ -172,6 +177,46 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>> {
         }
         CloseHandle(snapshot);
         Ok(out)
+    }
+}
+
+/// Suspend every thread of `pid` (Scylla's "suspend process for dumping"), so
+/// a dump is not racing with the target's code. Threads opened read-only for
+/// suspension; a thread that cannot be opened is skipped.
+pub fn suspend(pid: u32) -> Result<()> {
+    suspend_resume(pid, true)
+}
+
+/// Resume every thread of `pid` after a [`suspend`].
+pub fn resume(pid: u32) -> Result<()> {
+    suspend_resume(pid, false)
+}
+
+fn suspend_resume(pid: u32, do_suspend: bool) -> Result<()> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(PeError::Io(std::io::Error::last_os_error()));
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut ok = Thread32First(snapshot, &mut entry);
+        while ok != 0 {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if !thread.is_null() {
+                    if do_suspend {
+                        SuspendThread(thread);
+                    } else {
+                        ResumeThread(thread);
+                    }
+                    CloseHandle(thread);
+                }
+            }
+            ok = Thread32Next(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        Ok(())
     }
 }
 

@@ -33,10 +33,61 @@ fn main() {
         match cmd {
             "get-imports" => cmd_get_imports(&args[1..]),
             "fix-tree" => cmd_fix_tree(&args[1..]),
+            "search-iat" => cmd_search_iat(&args[1..]),
             _ => cmd_dump(&args),
         }
     } else {
         cmd_dump(&args);
+    }
+}
+
+fn cmd_search_iat(args: &[String]) {
+    let pid = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or_else(|| usage("search-iat <pid> [start_va] [--advanced]"));
+    let mut start_va: Option<u64> = None;
+    let mut advanced = false;
+    for a in &args[1..] {
+        match a.as_str() {
+            "--advanced" => advanced = true,
+            other => start_va = parse_u64(other),
+        }
+    }
+    let start_va = match start_va {
+        Some(va) => va,
+        None => {
+            // Default: the target's entry point (runtime base + entry RVA).
+            match process::dump(pid) {
+                Ok(doc) => {
+                    let base = process::module_range(pid)
+                        .map(|(b, _)| b)
+                        .unwrap_or(doc.optional.image_base());
+                    base + doc.optional.address_of_entry_point().get() as u64
+                }
+                Err(e) => die(&format!("dump failed: {e}")),
+            }
+        }
+    };
+    match process::search_iat(pid, start_va, advanced) {
+        Ok(Some((va, size))) => {
+            let resolver = match process::ProcessResolver::for_process(pid) {
+                Ok(r) => r,
+                Err(e) => die(&format!("resolver failed: {e}")),
+            };
+            println!(
+                "IAT VA {:#x} RVA {:#x} size 0x{:x} ({})",
+                va,
+                va.saturating_sub(resolver.image_base),
+                size,
+                size
+            );
+        }
+        Ok(None) => {
+            eprintln!("IAT not found from {:#x}", start_va);
+            std::process::exit(1);
+        }
+        Err(e) => die(&format!("search failed: {e}")),
     }
 }
 

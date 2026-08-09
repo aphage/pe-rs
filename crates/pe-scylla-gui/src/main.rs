@@ -325,6 +325,35 @@ impl ScyllaGui {
         }
     }
 
+    /// Scylla's "IAT Autosearch": find the IAT in the live process starting
+    /// from the OEP (or the dumped entry point) and fill the IAT fields.
+    fn iat_autosearch(&mut self) {
+        let Some(resolver) = self.resolver.as_ref() else {
+            self.status = "no process — dump a process first".into();
+            return;
+        };
+        let pid = self.pid.parse::<u32>().unwrap_or(0);
+        let entry_rva = self
+            .doc
+            .as_ref()
+            .map(|d| d.optional.address_of_entry_point().get() as u64)
+            .unwrap_or(0);
+        let oep_rva = parse_hex64(&self.oep).unwrap_or(entry_rva);
+        let start = resolver.image_base + oep_rva;
+        match process::search_iat(pid, start, false) {
+            Ok(Some((va, size))) => {
+                self.iat_va = format!("{va:#x}");
+                self.iat_size = format!("{size:#x}");
+                self.status = format!(
+                    "IAT autosearch — VA {va:#x} RVA {:#x} size {size}",
+                    va.saturating_sub(resolver.image_base)
+                );
+            }
+            Ok(None) => self.status = format!("IAT not found from {start:#x}"),
+            Err(e) => self.status = format!("IAT autosearch failed: {e}"),
+        }
+    }
+
     /// Serialize the document and write it to `path`. When the import table
     /// looks broken (a dump that was never fixed, unresolved entries, or an
     /// empty import table), stash the path and ask the user first — they can
@@ -777,6 +806,15 @@ impl ScyllaGui {
                 .clicked()
             {
                 self.scan_iat();
+            }
+            if ui
+                .add_enabled(has_resolver, egui::Button::new("IAT Auto"))
+                .on_hover_text(
+                    "Autosearch the IAT in the live process (from the OEP); fills IAT VA/Size",
+                )
+                .clicked()
+            {
+                self.iat_autosearch();
             }
             if ui
                 .add_enabled(has_resolver, egui::Button::new("Get Imports"))
