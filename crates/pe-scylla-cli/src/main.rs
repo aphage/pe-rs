@@ -34,10 +34,58 @@ fn main() {
             "get-imports" => cmd_get_imports(&args[1..]),
             "fix-tree" => cmd_fix_tree(&args[1..]),
             "search-iat" => cmd_search_iat(&args[1..]),
+            "dump-memory" => cmd_dump_memory(&args[1..]),
+            "dump-section" => cmd_dump_section(&args[1..]),
             _ => cmd_dump(&args),
         }
     } else {
         cmd_dump(&args);
+    }
+}
+
+fn cmd_dump_memory(args: &[String]) {
+    let pid = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or_else(|| usage("dump-memory <pid> <base> <size> <out>"));
+    let base = args
+        .get(1)
+        .and_then(|s| parse_u64(s))
+        .unwrap_or_else(|| usage("dump-memory <pid> <base> <size> <out>"));
+    let size = args
+        .get(2)
+        .and_then(|s| parse_usize(s))
+        .unwrap_or_else(|| usage("dump-memory <pid> <base> <size> <out>"));
+    let out = args
+        .get(3)
+        .unwrap_or_else(|| usage("dump-memory <pid> <base> <size> <out>"));
+    match process::dump_memory(pid, base, size) {
+        Ok(bytes) => match std::fs::write(out, &bytes) {
+            Ok(()) => println!("wrote {} bytes to {out}", bytes.len()),
+            Err(e) => die(&format!("write failed: {e}")),
+        },
+        Err(e) => die(&format!("dump memory failed: {e}")),
+    }
+}
+
+fn cmd_dump_section(args: &[String]) {
+    let pid = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or_else(|| usage("dump-section <pid> <index> <out>"));
+    let index = args
+        .get(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or_else(|| usage("dump-section <pid> <index> <out>"));
+    let out = args
+        .get(2)
+        .unwrap_or_else(|| usage("dump-section <pid> <index> <out>"));
+    match process::dump_section(pid, index) {
+        Ok(bytes) => match std::fs::write(out, &bytes) {
+            Ok(()) => println!("wrote {} bytes to {out}", bytes.len()),
+            Err(e) => die(&format!("write failed: {e}")),
+        },
+        Err(e) => die(&format!("dump section failed: {e}")),
     }
 }
 
@@ -251,6 +299,7 @@ fn cmd_dump(args: &[String]) {
     let mut method = ScanMethod::Resolver;
     let mut validate = true;
     let mut rebase: Option<u64> = None;
+    let mut oep: Option<u32> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -271,6 +320,15 @@ fn cmd_dump(args: &[String]) {
                 };
             }
             "--no-validate" => validate = false,
+            "--oep" => {
+                i += 1;
+                oep = Some(
+                    args.get(i)
+                        .and_then(|s| parse_u64(s))
+                        .map(|v| v as u32)
+                        .unwrap_or_else(|| usage("dump: --oep <rva>")),
+                );
+            }
             "--rebase" => {
                 // Optional base value (default 0x140000000); an arg that isn't
                 // a number is the next positional, not a base.
@@ -290,7 +348,7 @@ fn cmd_dump(args: &[String]) {
         }
         i += 1;
     }
-    if let Err(e) = run(pid, out.as_deref(), method, validate, rebase) {
+    if let Err(e) = run(pid, out.as_deref(), method, validate, rebase, oep) {
         eprintln!("FAILED: {e}");
         std::process::exit(1);
     }
@@ -334,8 +392,9 @@ fn run(
     method: ScanMethod,
     validate: bool,
     rebase: Option<u64>,
+    oep: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = process::dump(pid)?;
+    let mut doc = process::dump_with_oep(pid, oep)?;
     println!(
         "dumped pid {pid}: arch={:?} sections={} imports={}",
         doc.arch(),

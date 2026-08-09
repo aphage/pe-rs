@@ -223,8 +223,56 @@ fn suspend_resume(pid: u32, do_suspend: bool) -> Result<()> {
 /// Build a [`PeDocument`] from a running process's **main** module, reading its
 /// image from process memory (each section at `image_base + virtual_address`).
 pub fn dump(pid: u32) -> Result<PeDocument> {
-    let (base, _size) = module_range(pid)?;
-    dump_at(pid, base)
+    dump_with_oep(pid, None)
+}
+
+/// Like [`dump`], but sets the image's entry point to `oep_rva` when given
+/// (Scylla's "dump with OEP").
+pub fn dump_with_oep(pid: u32, oep_rva: Option<u32>) -> Result<PeDocument> {
+    let mut doc = dump_at(pid, module_range(pid)?.0)?;
+    if let Some(oep) = oep_rva {
+        doc.optional.set_address_of_entry_point(Rva(oep));
+    }
+    Ok(doc)
+}
+
+/// Read an arbitrary memory region of `pid` starting at `base` for `size`
+/// bytes, stopping at the first unreadable page (Scylla's "dump memory
+/// region"). Returns the bytes that could be read.
+pub fn dump_memory(pid: u32, base: u64, size: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(size);
+    let mut off = 0usize;
+    while off < size {
+        let chunk = (size - off).min(0x1000);
+        match read_memory(pid, base + off as u64, chunk) {
+            Ok(mut part) => {
+                let n = part.len();
+                out.append(&mut part);
+                if n < chunk {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        off += chunk;
+    }
+    if out.is_empty() {
+        Err(PeError::NotFound(
+            "dump_memory: nothing readable at the requested region".into(),
+        ))
+    } else {
+        Ok(out)
+    }
+}
+
+/// Dump one section of the process's main module (by index) into raw bytes
+/// (Scylla's "dump PE section").
+pub fn dump_section(pid: u32, index: usize) -> Result<Vec<u8>> {
+    let doc = dump(pid)?;
+    doc.sections
+        .get(index)
+        .map(|s| s.data.clone())
+        .ok_or_else(|| PeError::InvalidArgument(format!("dump_section: no section #{index}")))
 }
 
 /// A process created with [`spawn_paused`]: fully loaded by the OS and paused at
