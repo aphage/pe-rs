@@ -24,3 +24,7 @@ pub use pe_edit::domain::{
     ImportFunction, PeDocument, Rva, ScanMethod, ScanOptions,
 };
 pub use pe_edit::error::{PeError, Result};
+
+pub use api::{
+    ImportEntry, ImportModule, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports,
+};

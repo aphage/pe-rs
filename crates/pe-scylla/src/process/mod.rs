@@ -18,7 +18,7 @@ use pe_edit::domain::dos::DOS_MAGIC;
 use pe_edit::domain::import::ImportFunction;
 use pe_edit::domain::optional::PE32_MAGIC;
 use pe_edit::domain::types::Rva;
-use pe_edit::domain::{PeDocument, Section};
+use pe_edit::domain::{Arch, PeDocument, Section};
 use pe_edit::error::{PeError, Result};
 use pe_edit::io::pe::parser::{
     parse_coff, parse_dos, parse_exports_from_doc, parse_imports_from_doc,
@@ -474,9 +474,26 @@ fn dump_at(pid: u32, base: u64) -> Result<PeDocument> {
 /// Resolves IAT addresses against a live process's loaded modules, reading each
 /// module's export table from process memory. This is the resolver a GUI would
 /// use to scan / fix the IAT of a dumped process.
+///
+/// Several exported functions can share one virtual address (ordinal/name
+/// aliases, and modules whose exports *forward* to another module's function —
+/// e.g. kernel32's `EncodePointer` forwards to kernelbase). The resolver keeps
+/// **all** candidates per address and, when there are duplicates, scores them
+/// (`resolve_scored`) like Scylla's `ApiReader::getScoredApi`: a unique
+/// high-priority module (kernel32) with a name wins and is *valid*; otherwise
+/// the pick is best-effort and flagged *suspect*.
 pub struct ProcessResolver {
     pid: u32,
+    /// Image base of the process's main module (the dumped image's base), for
+    /// converting absolute VAs to RVAs.
+    pub image_base: u64,
     modules: Vec<ModuleExports>,
+    /// API virtual address → every exported (module, function) at that address.
+    /// Built from the OS-loaded modules; the resolution source for `resolve`.
+    candidates: HashMap<u64, Vec<ResolvedImport>>,
+    /// Module name → priority: 2 = high (kernel32), 0 = low (ntdll/kernelbase/
+    /// shlwapi), 1 = normal. Used by the duplicate-export scoring.
+    priority: HashMap<String, u8>,
     /// Code fingerprint of every named export of the system-loaded modules,
     /// used to resolve addresses in *memory-loaded* (manually mapped) modules
     /// that the OS module list does not report. Empty unless
@@ -486,7 +503,6 @@ pub struct ProcessResolver {
 
 struct ModuleExports {
     base: u64,
-    size: u32,
     name: String,
     /// Offset within the module → exported function.
     functions: HashMap<u32, ImportFunction>,
@@ -505,9 +521,14 @@ impl ProcessResolver {
         let handle = open_process(pid)?;
         let modules = unsafe { enumerate_modules(handle, pid)? };
         unsafe { CloseHandle(handle) };
+        let (candidates, priority) = build_candidates_and_priority(&modules);
+        let image_base = modules.first().map(|m| m.base).unwrap_or(0);
         Ok(Self {
             pid,
+            image_base,
             modules,
+            candidates,
+            priority,
             fingerprints: HashMap::new(),
         })
     }
@@ -523,6 +544,29 @@ impl ProcessResolver {
     /// The names of all loaded modules (for diagnostics).
     pub fn module_names(&self) -> Vec<String> {
         self.modules.iter().map(|m| m.name.clone()).collect()
+    }
+
+    /// The target process's PE pointer width, read from its main module header
+    /// (`Arch::Bit64` for PE32+). Defaults to 64-bit when the header can't be
+    /// read.
+    pub fn target_arch(&self) -> Arch {
+        target_arch(self.pid).unwrap_or(Arch::Bit64)
+    }
+
+    /// Resolve `address` and report whether the result is suspect (ambiguous:
+    /// several exported functions share the address and scoring did not find a
+    /// clear winner). Invalid addresses return `None`.
+    pub fn resolve_scored(&self, address: u64) -> Option<ApiResolve> {
+        if let Some(cands) = self.candidates.get(&address) {
+            return score_candidates(cands, &self.priority);
+        }
+        // A memory-loaded module (manual mapping) not reported by the OS:
+        // resolve by matching the code against the system-loaded copy.
+        self.resolve_fingerprint(address)
+            .map(|resolved| ApiResolve {
+                resolved,
+                suspect: false,
+            })
     }
 
     /// Resolve `address` by matching its code bytes against the exports of the
@@ -549,21 +593,117 @@ impl ProcessResolver {
     }
 }
 
+/// The outcome of resolving one IAT slot: the chosen API and whether the
+/// address was ambiguous (Scylla's "suspect" import).
+#[derive(Debug, Clone)]
+pub struct ApiResolve {
+    pub resolved: ResolvedImport,
+    pub suspect: bool,
+}
+
 impl ImportResolver for ProcessResolver {
     fn resolve(&self, address: u64) -> Option<ResolvedImport> {
-        // Fast path: the address is inside an OS-loaded module.
-        for m in &self.modules {
-            if address >= m.base && address < m.base + m.size as u64 {
-                let off = (address - m.base) as u32;
-                return m.functions.get(&off).map(|f| ResolvedImport {
+        self.resolve_scored(address).map(|a| a.resolved)
+    }
+}
+
+/// Flatten every module's exports into an address→candidates map and a module
+/// name→priority map. The priority drives duplicate-export scoring.
+fn build_candidates_and_priority(
+    modules: &[ModuleExports],
+) -> (HashMap<u64, Vec<ResolvedImport>>, HashMap<String, u8>) {
+    let mut candidates: HashMap<u64, Vec<ResolvedImport>> = HashMap::new();
+    let mut priority: HashMap<String, u8> = HashMap::new();
+    for m in modules {
+        priority.insert(m.name.clone(), module_priority(&m.name));
+        for (off, function) in &m.functions {
+            candidates
+                .entry(m.base + *off as u64)
+                .or_default()
+                .push(ResolvedImport {
                     module: m.name.clone(),
-                    function: f.clone(),
+                    function: function.clone(),
                 });
-            }
         }
-        // Fallback: a memory-loaded module (manual mapping) not reported by the
-        // OS — resolve by matching the code against the system-loaded copy.
-        self.resolve_fingerprint(address)
+    }
+    (candidates, priority)
+}
+
+/// Module priority for duplicate-export scoring (Scylla's
+/// `setModulePriority`): kernel32 is high, ntdll / kernelbase / shlwapi are
+/// low, everything else normal.
+fn module_priority(name: &str) -> u8 {
+    match name.to_ascii_lowercase().as_str() {
+        "kernel32.dll" => 2,
+        "ntdll.dll" | "kernelbase.dll" | "shlwapi.dll" => 0,
+        _ => 1,
+    }
+}
+
+/// Pick the best candidate among the exports sharing `address`, mirroring
+/// Scylla's `ApiReader::getScoredApi` fallback chain. A unique named candidate
+/// from a high-priority module is *valid*; any other pick is best-effort and
+/// flagged suspect.
+fn score_candidates(
+    cands: &[ResolvedImport],
+    priority: &HashMap<String, u8>,
+) -> Option<ApiResolve> {
+    if cands.is_empty() {
+        return None;
+    }
+    let pick = |cs: &[&ResolvedImport]| cs.first().map(|c| (*c).clone());
+    if cands.len() == 1 {
+        return Some(ApiResolve {
+            resolved: cands[0].clone(),
+            suspect: false,
+        });
+    }
+    let high = |c: &ResolvedImport| priority.get(&c.module).copied().unwrap_or(1) == 2;
+    let named_high: Vec<&ResolvedImport> = cands
+        .iter()
+        .filter(|c| high(c) && c.function.name().is_some())
+        .collect();
+    if named_high.len() == 1 {
+        return pick(&named_high).map(|resolved| ApiResolve {
+            resolved,
+            suspect: false,
+        });
+    }
+    let named: Vec<&ResolvedImport> = cands
+        .iter()
+        .filter(|c| c.function.name().is_some())
+        .collect();
+    if named.len() == 1 {
+        return pick(&named).map(|resolved| ApiResolve {
+            resolved,
+            suspect: true,
+        });
+    }
+    let high_only: Vec<&ResolvedImport> = cands.iter().filter(|c| high(c)).collect();
+    if high_only.len() == 1 {
+        return pick(&high_only).map(|resolved| ApiResolve {
+            resolved,
+            suspect: true,
+        });
+    }
+    // Ambiguous with no clear winner: first candidate, suspect.
+    Some(ApiResolve {
+        resolved: cands[0].clone(),
+        suspect: true,
+    })
+}
+
+/// The target process's PE pointer width, read from its main module header.
+pub fn target_arch(pid: u32) -> Result<Arch> {
+    let (base, _size) = module_range(pid)?;
+    let nt = read_memory(pid, base, 0x40)?;
+    let pe_off = u32::from_le_bytes(nt[0x3c..0x40].try_into().unwrap()) as u64;
+    let opt = read_memory(pid, base + pe_off + 4 + 20, 2)?;
+    let magic = u16::from_le_bytes(opt.try_into().unwrap());
+    if magic == PE32_MAGIC {
+        Ok(Arch::Bit32)
+    } else {
+        Ok(Arch::Bit64) // PE32+ (or unreadable → assume 64-bit)
     }
 }
 
@@ -626,7 +766,6 @@ unsafe fn enumerate_modules(handle: HANDLE, pid: u32) -> Result<Vec<ModuleExport
                 continue;
             }
             let base = info.lpBaseOfDll as usize as u64;
-            let size = info.SizeOfImage;
             let mut name_buf = [0u16; 256];
             let len = GetModuleBaseNameW(
                 handle,
@@ -638,7 +777,6 @@ unsafe fn enumerate_modules(handle: HANDLE, pid: u32) -> Result<Vec<ModuleExport
             let functions = read_module_exports(pid, base);
             out.push(ModuleExports {
                 base,
-                size,
                 name,
                 functions,
             });
