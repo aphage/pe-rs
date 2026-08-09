@@ -191,6 +191,15 @@ pub struct IatFixOptions {
     /// interleaved split IAT) the fixer falls back to pointing `FirstThunk` at
     /// the new table's own IAT arrays.
     pub reuse_iat_slots: bool,
+    /// Write each descriptor's `OriginalFirstThunk` (the hint/name thunk
+    /// array) alongside `FirstThunk`. This is the standard runnable-dump shape
+    /// and the default. When false, the OFT fields are zeroed after the rebuild
+    /// (Scylla's "use OFT" toggle off).
+    pub write_oft: bool,
+    /// Force the rebuild to place a **new IAT in a (new) section** instead of
+    /// reusing the original slots — Scylla's "create new IAT in section". The
+    /// code references are rewritten to the new table's IAT arrays.
+    pub new_iat_in_section: bool,
 }
 
 impl Default for IatFixOptions {
@@ -198,6 +207,8 @@ impl Default for IatFixOptions {
         Self {
             redirect_iat: true,
             reuse_iat_slots: true,
+            write_oft: true,
+            new_iat_in_section: false,
         }
     }
 }

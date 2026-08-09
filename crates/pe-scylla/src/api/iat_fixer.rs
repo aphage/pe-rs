@@ -136,11 +136,15 @@ pub(crate) fn rebuild_from_descriptors_with_slots(
     // each rebuilt descriptor's FirstThunk at the original slots so the
     // loader resolves imports into the slots the code references — the
     // shape that makes a fixed dump runnable. Otherwise fall back to the
-    // new table's own IAT arrays.
+    // new table's own IAT arrays. `new_iat_in_section` forces the fallback
+    // (Scylla's "create new IAT in section").
     let contiguous = descriptors_with_slots
         .iter()
         .all(|(_, slots)| slots.windows(2).all(|w| w[1].get() == w[0].get() + psize));
-    let use_in_place = options.redirect_iat && options.reuse_iat_slots && contiguous;
+    let use_in_place = options.redirect_iat
+        && options.reuse_iat_slots
+        && !options.new_iat_in_section
+        && contiguous;
 
     let rebuilt = if use_in_place {
         let slots: Vec<Vec<Rva>> = descriptors_with_slots
@@ -155,6 +159,20 @@ pub(crate) fn rebuild_from_descriptors_with_slots(
     report.iat_reused = use_in_place;
     report.new_import_rva = Some(rebuilt.rva);
     report.new_import_size = rebuilt.size as usize;
+
+    // Scylla's OFT toggle: when off, zero each descriptor's OriginalFirstThunk
+    // field (the hint/name array reference), leaving only FirstThunk. Not the
+    // runnable-dump shape — the default keeps OFT written.
+    if !options.write_oft {
+        for m in 0..descriptors.len() {
+            let desc_rva = rebuilt
+                .rva
+                .get()
+                .checked_add((m as u32) * 20)
+                .ok_or_else(|| PeError::InvalidArgument("descriptor RVA overflow".into()))?;
+            doc.write(Rva(desc_rva), &[0u8; 4])?;
+        }
+    }
 
     // Redirect: overwrite the original IAT slots with the new thunk values,
     // so code that calls through the old IAT still lands on a loader-fixable

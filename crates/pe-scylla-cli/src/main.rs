@@ -36,10 +36,58 @@ fn main() {
             "search-iat" => cmd_search_iat(&args[1..]),
             "dump-memory" => cmd_dump_memory(&args[1..]),
             "dump-section" => cmd_dump_section(&args[1..]),
+            "direct" => cmd_direct(&args[1..]),
             _ => cmd_dump(&args),
         }
     } else {
         cmd_dump(&args);
+    }
+}
+
+fn cmd_direct(args: &[String]) {
+    let pid = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or_else(|| usage("direct <pid> [out]"));
+    let out = args.get(1).cloned();
+    let mut doc = match process::dump(pid) {
+        Ok(d) => d,
+        Err(e) => die(&format!("dump failed: {e}")),
+    };
+    let resolver = match process::ProcessResolver::for_process(pid) {
+        Ok(r) => r,
+        Err(e) => die(&format!("resolver failed: {e}")),
+    };
+    let direct = match pe_scylla::api::scan_direct_imports(&doc, &resolver) {
+        Ok(d) => d,
+        Err(e) => die(&format!("scan direct imports failed: {e}")),
+    };
+    println!("found {} direct imports", direct.len());
+    for d in &direct {
+        println!(
+            "  call at rva {:#x} -> {}!{} ({:#x})",
+            d.insn_rva.get(),
+            d.module,
+            d.function.display_name(),
+            d.api_va
+        );
+    }
+    if direct.is_empty() {
+        return;
+    }
+    let added = match pe_scylla::api::add_direct_imports_to_doc(&mut doc, &direct) {
+        Ok(n) => n,
+        Err(e) => die(&format!("add direct imports failed: {e}")),
+    };
+    println!("added {added} new imports");
+    if let Some(out) = out {
+        match serialize(&doc) {
+            Ok(bytes) => match std::fs::write(&out, &bytes) {
+                Ok(()) => println!("wrote {} bytes to {out}", bytes.len()),
+                Err(e) => die(&format!("write failed: {e}")),
+            },
+            Err(e) => die(&format!("serialize failed: {e}")),
+        }
     }
 }
 
