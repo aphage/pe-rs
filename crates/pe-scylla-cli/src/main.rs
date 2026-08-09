@@ -23,7 +23,7 @@ use pe_edit::io::pe::serialize;
 use pe_scylla::api::{IatFixer, IatScanner, ImportStatus, fix_iat_from_tree, get_imports};
 use pe_scylla::feature::rebase_dump;
 use pe_scylla::process;
-use pe_scylla::{IatFixOptions, ScanMethod, ScanOptions};
+use pe_scylla::{IatFixOptions, ImportsTree, ScanMethod, ScanOptions};
 
 const DEFAULT_PREFERRED_BASE: u64 = 0x1_4000_0000; // 0x140000000, typical x64 exe base
 
@@ -32,15 +32,46 @@ fn main() {
     if let Some(cmd) = args.first().map(String::as_str) {
         match cmd {
             "get-imports" => cmd_get_imports(&args[1..]),
+            "load-tree" => cmd_load_tree(&args[1..]),
             "fix-tree" => cmd_fix_tree(&args[1..]),
             "search-iat" => cmd_search_iat(&args[1..]),
             "dump-memory" => cmd_dump_memory(&args[1..]),
             "dump-section" => cmd_dump_section(&args[1..]),
             "direct" => cmd_direct(&args[1..]),
+            "pe-rebuild" => cmd_pe_rebuild(&args[1..]),
             _ => cmd_dump(&args),
         }
     } else {
         cmd_dump(&args);
+    }
+}
+
+fn cmd_pe_rebuild(args: &[String]) {
+    let path = args.first().unwrap_or_else(|| {
+        usage("pe-rebuild <file> [--remove-dos-stub] [--update-checksum] [--create-backup]")
+    });
+    let mut options = pe_scylla::feature::PeRebuildOptions::default();
+    for a in &args[1..] {
+        match a.as_str() {
+            "--remove-dos-stub" => options.remove_dos_stub = true,
+            "--update-checksum" => options.update_checksum = true,
+            "--create-backup" => options.create_backup = true,
+            other => eprintln!("unexpected argument '{other}'"),
+        }
+    }
+    match pe_scylla::feature::pe_rebuild(std::path::Path::new(path), &options) {
+        Ok(r) => {
+            let pct = r
+                .new_size
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(r.old_size))
+                .unwrap_or(0);
+            println!(
+                "rebuild success {path}: old {} bytes, new {} bytes ({}%)",
+                r.old_size, r.new_size, pct
+            );
+        }
+        Err(e) => die(&format!("rebuild failed: {e}")),
     }
 }
 
@@ -231,6 +262,71 @@ fn cmd_get_imports(args: &[String]) {
             };
             println!("      {st} rva={:#x} {}", e.slot_rva, e.label());
         }
+    }
+    if let Some(path) = args
+        .get(3)
+        .and_then(|s| s.strip_prefix("--save="))
+        .map(str::to_string)
+    {
+        save_tree(&path, iat_va, iat_size, &tree);
+    } else if args.get(3) == Some(&"--save".to_string()) {
+        let path = args
+            .get(4)
+            .unwrap_or_else(|| usage("get-imports: --save <path>"))
+            .to_string();
+        save_tree(&path, iat_va, iat_size, &tree);
+    }
+}
+
+fn cmd_load_tree(args: &[String]) {
+    let path = args
+        .first()
+        .unwrap_or_else(|| usage("load-tree <file.json|file.xml>"));
+    let file = match path.ends_with(".json") {
+        true => pe_scylla::io::tree::load_json(std::path::Path::new(path)),
+        false => pe_scylla::io::tree::load_xml(std::path::Path::new(path)),
+    };
+    let file = match file {
+        Ok(f) => f,
+        Err(e) => die(&format!("load tree failed: {e}")),
+    };
+    println!(
+        "oep={:#x} iat_va={:#x} iat_size={} — {} modules, {} imports ({} valid, {} suspect, {} invalid)",
+        file.oep,
+        file.iat_va,
+        file.iat_size,
+        file.tree.modules.len(),
+        file.tree.total(),
+        file.tree.valid(),
+        file.tree.suspect(),
+        file.tree.invalid(),
+    );
+    for m in &file.tree.modules {
+        println!(
+            "  {:<28} first_thunk={:#x} ({} entries)",
+            m.name,
+            m.first_thunk,
+            m.entries.len()
+        );
+    }
+}
+
+/// Save a tree, picking JSON or XML from the file extension.
+fn save_tree(path: &str, iat_va: u64, iat_size: usize, tree: &ImportsTree) {
+    let file = pe_scylla::io::tree::TreeFile {
+        oep: 0,
+        iat_va,
+        iat_size,
+        tree: tree.clone(),
+    };
+    let res = if path.ends_with(".json") {
+        pe_scylla::io::tree::save_json(std::path::Path::new(path), &file)
+    } else {
+        pe_scylla::io::tree::save_xml(std::path::Path::new(path), &file)
+    };
+    match res {
+        Ok(()) => println!("saved import tree to {path}"),
+        Err(e) => die(&format!("save tree failed: {e}")),
     }
 }
 

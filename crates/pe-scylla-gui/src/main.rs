@@ -12,7 +12,9 @@ use eframe::egui;
 use pe_edit::domain::{IatFixOptions, IatFixReport, IatScan, ScanMethod, ScanOptions};
 use pe_edit::io::pe::{parse, serialize};
 use pe_scylla::api::{IatScanner, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports};
+use pe_scylla::io::tree::{TreeFile, load_json, load_xml, save_json, save_xml};
 use pe_scylla::process::{self, ModuleInfo, ProcessInfo, ProcessResolver};
+use std::path::Path;
 use std::sync::mpsc;
 
 /// Result of an async file dialog (picked path, or `None` if cancelled).
@@ -151,6 +153,19 @@ struct ScyllaGui {
     /// uncheck to drop the entry from Fix Dump.
     tree_keep: Vec<bool>,
     status: String,
+    /// Rolling log of actions, shown at the bottom.
+    log: Vec<String>,
+    /// Options dialog visibility + the tunable flags.
+    show_options: bool,
+    suspend_before_dump: bool,
+    advanced_search: bool,
+    scan_direct_imports: bool,
+    /// Disassembler view state.
+    show_disasm: bool,
+    disasm_section: usize,
+    /// Pending async tree save/load dialog results.
+    tree_save_rx: Option<mpsc::Receiver<PickResult>>,
+    tree_load_rx: Option<mpsc::Receiver<PickResult>>,
     /// Pending async "open file" dialog result.
     pick_rx: Option<mpsc::Receiver<PickResult>>,
     /// Pending async "save file" dialog result.
@@ -173,6 +188,15 @@ impl ScyllaGui {
         self.last_fix = None;
     }
 
+    /// Append a line to the log (bounded) and the status bar.
+    fn log_line(&mut self, s: String) {
+        if self.log.len() >= 200 {
+            self.log.remove(0);
+        }
+        self.log.push(s.clone());
+        self.status = s;
+    }
+
     fn load_file(&mut self) {
         self.clear_iat();
         match std::fs::read(&self.path) {
@@ -192,10 +216,14 @@ impl ScyllaGui {
     /// modules (`base: Some`) into the working image, replacing the current one.
     fn dump_module_at(&mut self, pid: u32, base: Option<u64>, label: &str) {
         self.clear_iat();
+        let suspended = self.suspend_before_dump && process::suspend(pid).is_ok();
         let dumped = match base {
             Some(base) => process::dump_module(pid, base),
             None => process::dump(pid),
         };
+        if suspended {
+            let _ = process::resume(pid);
+        }
         match dumped {
             Ok(doc) => {
                 let entry = doc.optional.address_of_entry_point().get();
@@ -340,7 +368,7 @@ impl ScyllaGui {
             .unwrap_or(0);
         let oep_rva = parse_hex64(&self.oep).unwrap_or(entry_rva);
         let start = resolver.image_base + oep_rva;
-        match process::search_iat(pid, start, false) {
+        match process::search_iat(pid, start, self.advanced_search) {
             Ok(Some((va, size))) => {
                 self.iat_va = format!("{va:#x}");
                 self.iat_size = format!("{size:#x}");
@@ -452,6 +480,88 @@ impl ScyllaGui {
         self.save_rx = Some(rx);
     }
 
+    /// Open a "save tree" dialog (XML or JSON) on a background thread.
+    fn save_tree_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Save import tree")
+                .add_filter("XML", &["xml"])
+                .add_filter("JSON", &["json"])
+                .set_file_name("imports.xml")
+                .save_file();
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        });
+        self.tree_save_rx = Some(rx);
+    }
+
+    /// Open a "load tree" dialog on a background thread.
+    fn load_tree_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Load import tree")
+                .add_filter("Import trees", &["xml", "json"])
+                .pick_file();
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        });
+        self.tree_load_rx = Some(rx);
+    }
+
+    /// Persist the current import tree (XML or JSON by extension) with the
+    /// OEP / IAT metadata.
+    fn save_tree(&mut self, path: String) {
+        let Some(tree) = self.tree.as_ref() else {
+            self.log_line("no import tree to save".into());
+            return;
+        };
+        let file = TreeFile {
+            oep: parse_hex64(&self.oep).unwrap_or(0) as u32,
+            iat_va: parse_hex64(&self.iat_va).unwrap_or(0),
+            iat_size: parse_hex64(&self.iat_size).unwrap_or(0) as usize,
+            tree: tree.clone(),
+        };
+        let res = if path.ends_with(".json") {
+            save_json(Path::new(&path), &file)
+        } else {
+            save_xml(Path::new(&path), &file)
+        };
+        match res {
+            Ok(()) => self.log_line(format!("saved import tree to {path}")),
+            Err(e) => self.log_line(format!("save tree failed: {e}")),
+        }
+    }
+
+    /// Load a saved import tree into the working tree.
+    fn load_tree(&mut self, path: String) {
+        let res = if path.ends_with(".json") {
+            load_json(Path::new(&path))
+        } else {
+            load_xml(Path::new(&path))
+        };
+        match res {
+            Ok(file) => {
+                self.tree = Some(file.tree);
+                self.tree_keep = vec![true; self.tree.as_ref().map(|t| t.total()).unwrap_or(0)];
+                if file.oep != 0 {
+                    self.oep = format!("{:#x}", file.oep);
+                }
+                if file.iat_va != 0 {
+                    self.iat_va = format!("{:#x}", file.iat_va);
+                }
+                if file.iat_size != 0 {
+                    self.iat_size = format!("{:#x}", file.iat_size);
+                }
+                self.log_line(format!("loaded import tree from {path}"));
+            }
+            Err(e) => self.log_line(format!("load tree failed: {e}")),
+        }
+    }
+
     /// Collect a completed async dialog result, clearing the pending slot.
     fn drain_pick(rx: &mut Option<mpsc::Receiver<PickResult>>) -> PickResult {
         let r = rx.as_ref()?;
@@ -479,6 +589,14 @@ impl eframe::App for ScyllaGui {
         if let Some(path) = Self::drain_pick(&mut self.save_rx) {
             self.save_path = path.to_string_lossy().into_owned();
             self.save_to(self.save_path.clone());
+        }
+        if let Some(path) = Self::drain_pick(&mut self.tree_save_rx) {
+            let path = path.to_string_lossy().into_owned();
+            self.save_tree(path);
+        }
+        if let Some(path) = Self::drain_pick(&mut self.tree_load_rx) {
+            let path = path.to_string_lossy().into_owned();
+            self.load_tree(path);
         }
 
         // Drag-and-drop a PE file onto the window.
@@ -513,6 +631,24 @@ impl eframe::App for ScyllaGui {
                     }
                     if ui.button("Save As…").clicked() {
                         self.save_dialog(ui.ctx());
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Save Tree…").clicked() {
+                        self.save_tree_dialog(ui.ctx());
+                        ui.close();
+                    }
+                    if ui.button("Load Tree…").clicked() {
+                        self.load_tree_dialog(ui.ctx());
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Disassembler").clicked() {
+                        self.show_disasm = true;
+                        ui.close();
+                    }
+                    if ui.button("Options…").clicked() {
+                        self.show_options = true;
                         ui.close();
                     }
                     ui.separator();
@@ -572,6 +708,19 @@ impl eframe::App for ScyllaGui {
                 return;
             }
             self.show_workflow(ui);
+        });
+
+        // Log panel: the last few actions.
+        egui::Panel::bottom("log").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Log");
+                ui.separator();
+                let start = self.log.len().saturating_sub(5);
+                for line in &self.log[start..] {
+                    ui.weak(line);
+                    ui.separator();
+                }
+            });
         });
 
         // Process picker: a separate native window, detached from the main
@@ -740,6 +889,71 @@ impl eframe::App for ScyllaGui {
             );
             if close_picker {
                 self.show_process_picker = false;
+            }
+        }
+
+        // Options dialog: Scylla's tunable flags.
+        if self.show_options {
+            egui::Window::new("Options")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.checkbox(&mut self.suspend_before_dump, "Suspend process for dumping");
+                    ui.checkbox(&mut self.advanced_search, "Advanced IAT search");
+                    ui.checkbox(&mut self.scan_direct_imports, "Scan direct imports");
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        self.show_options = false;
+                    }
+                });
+        }
+
+        // Disassembler view: disassemble a section of the working image.
+        if self.show_disasm {
+            let mut close = false;
+            egui::Window::new("Disassembler")
+                .default_width(620.0)
+                .show(ui.ctx(), |ui| {
+                    if let Some(doc) = self.doc.as_ref() {
+                        ui.horizontal(|ui| {
+                            ui.label("Section:");
+                            egui::ComboBox::from_id_salt("disasm_sec")
+                                .selected_text(format!(
+                                    "#{} {}",
+                                    self.disasm_section,
+                                    doc.sections
+                                        .get(self.disasm_section)
+                                        .map(|s| s.name_str())
+                                        .unwrap_or_else(|| "?".to_string())
+                                ))
+                                .show_ui(ui, |ui| {
+                                    for i in 0..doc.sections.len() {
+                                        ui.selectable_value(
+                                            &mut self.disasm_section,
+                                            i,
+                                            format!("#{i} {}", doc.sections[i].name_str()),
+                                        );
+                                    }
+                                });
+                        });
+                        if let Ok(lines) =
+                            pe_scylla::feature::disassemble_section(doc, self.disasm_section, 500)
+                        {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                for line in lines {
+                                    ui.monospace(line);
+                                }
+                            });
+                        }
+                    } else {
+                        ui.label("no document");
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if close {
+                self.show_disasm = false;
             }
         }
 

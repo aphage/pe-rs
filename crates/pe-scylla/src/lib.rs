@@ -12,6 +12,7 @@
 
 pub mod api;
 pub mod feature;
+pub mod io;
 
 #[cfg(target_os = "windows")]
 pub mod process;
@@ -28,3 +29,4 @@ pub use pe_edit::error::{PeError, Result};
 pub use api::{
     ImportEntry, ImportModule, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports,
 };
+pub use io::tree::{TreeFile, load_json, load_xml, save_json, save_xml};
