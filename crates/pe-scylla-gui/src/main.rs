@@ -6,11 +6,11 @@
 //! an **IAT address/size** (typed by hand or filled by Scan IAT), **Get Imports**
 //! resolves the live process's IAT into a per-module import tree (✓ valid /
 //! ? suspect / ✗ invalid), the tree is curated, and **Fix Dump** rebuilds the
-//! imports from it (writing the OEP). An existing dump file can also be opened.
+//! imports from it (writing the OEP).
 
 use eframe::egui;
 use pe_edit::domain::{IatFixOptions, IatFixReport, IatScan, ScanMethod, ScanOptions};
-use pe_edit::io::pe::{parse, serialize};
+use pe_edit::io::pe::serialize;
 use pe_scylla::api::{IatScanner, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports};
 use pe_scylla::io::tree::{TreeFile, load_json, load_xml, save_json, save_xml};
 use pe_scylla::process::{self, ModuleInfo, ProcessInfo, ProcessResolver};
@@ -112,18 +112,8 @@ fn parse_hex64(s: &str) -> Option<u64> {
     }
 }
 
-/// Where the current document came from — drives Save behaviour and the
-/// save-time import-table health check.
-#[derive(Default, PartialEq, Clone, Copy)]
-enum Source {
-    #[default]
-    File,
-    Dump,
-}
-
 #[derive(Default)]
 struct ScyllaGui {
-    path: String,
     pid: String,
     /// Short label of the dumped module ("main module" or the DLL name), for
     /// the document-source line in the toolbar.
@@ -132,7 +122,6 @@ struct ScyllaGui {
     doc: Option<pe_edit::domain::PeDocument>,
     resolver: Option<ProcessResolver>,
     scan: Option<IatScan>,
-    source: Source,
     /// Outcome of the last successful IAT fix, for the save health check.
     last_fix: Option<IatFixReport>,
     /// Pending save-time confirmation: the warning text to show and the path
@@ -166,8 +155,6 @@ struct ScyllaGui {
     /// Pending async tree save/load dialog results.
     tree_save_rx: Option<mpsc::Receiver<PickResult>>,
     tree_load_rx: Option<mpsc::Receiver<PickResult>>,
-    /// Pending async "open file" dialog result.
-    pick_rx: Option<mpsc::Receiver<PickResult>>,
     /// Pending async "save file" dialog result.
     save_rx: Option<mpsc::Receiver<PickResult>>,
     /// Process picker state.
@@ -197,21 +184,6 @@ impl ScyllaGui {
         self.status = s;
     }
 
-    fn load_file(&mut self) {
-        self.clear_iat();
-        match std::fs::read(&self.path) {
-            Ok(bytes) => match parse(&bytes) {
-                Ok(doc) => {
-                    self.doc = Some(doc);
-                    self.source = Source::File;
-                    self.status = format!("loaded {}", self.path);
-                }
-                Err(e) => self.status = format!("parse failed: {e}"),
-            },
-            Err(e) => self.status = format!("read failed: {e}"),
-        }
-    }
-
     /// Dump a process's main module (`base: None`) or one of its loaded
     /// modules (`base: Some`) into the working image, replacing the current one.
     fn dump_module_at(&mut self, pid: u32, base: Option<u64>, label: &str) {
@@ -229,7 +201,6 @@ impl ScyllaGui {
                 let entry = doc.optional.address_of_entry_point().get();
                 self.resolver = ProcessResolver::for_process(pid).ok();
                 self.doc = Some(doc);
-                self.source = Source::Dump;
                 self.dump_label = label.to_string();
                 // Pre-fill the OEP field with the dumped entry point (RVA).
                 if self.oep.is_empty() {
@@ -412,17 +383,15 @@ impl ScyllaGui {
         }
     }
 
-    /// Save to the document's own path (file source) or the last "Save As…"
-    /// path; a dump that has never been saved goes through the Save As dialog.
+    /// Save to the last "Save As…" path, or open the Save As dialog for a dump
+    /// that has not been saved yet (Scylla's dump is always written to a
+    /// user-chosen path).
     fn save(&mut self, ctx: &egui::Context) {
-        let path = if self.source == Source::File && self.save_path.trim().is_empty() {
-            self.path.clone()
-        } else if !self.save_path.trim().is_empty() {
-            self.save_path.clone()
-        } else {
+        if self.save_path.trim().is_empty() {
             self.save_dialog(ctx);
             return;
-        };
+        }
+        let path = self.save_path.clone();
         self.save_to(path);
     }
 
@@ -437,7 +406,7 @@ impl ScyllaGui {
                 r.unresolved.len()
             ));
         }
-        if self.source == Source::Dump && self.last_fix.is_none() {
+        if self.last_fix.is_none() {
             return Some(
                 "该文件来自进程 dump,导入表尚未修复,保存的 dump 通常无法直接运行。".into(),
             );
@@ -446,22 +415,6 @@ impl ScyllaGui {
             return Some("导入表为空,可能无法正常运行。".into());
         }
         None
-    }
-
-    /// Open a native file dialog on a background thread (avoids blocking the
-    /// egui event loop); the result lands in `pick_rx`.
-    fn open_dialog(&mut self, ctx: &egui::Context) {
-        let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Open PE file")
-                .add_filter("PE files", &["exe", "dll", "sys"])
-                .pick_file();
-            let _ = tx.send(picked);
-            ctx.request_repaint();
-        });
-        self.pick_rx = Some(rx);
     }
 
     /// Open a native "save as" dialog on a background thread.
@@ -582,10 +535,6 @@ impl ScyllaGui {
 impl eframe::App for ScyllaGui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Apply results of async file dialogs (spawned on background threads).
-        if let Some(path) = Self::drain_pick(&mut self.pick_rx) {
-            self.path = path.to_string_lossy().into_owned();
-            self.load_file();
-        }
         if let Some(path) = Self::drain_pick(&mut self.save_rx) {
             self.save_path = path.to_string_lossy().into_owned();
             self.save_to(self.save_path.clone());
@@ -599,24 +548,10 @@ impl eframe::App for ScyllaGui {
             self.load_tree(path);
         }
 
-        // Drag-and-drop a PE file onto the window.
-        let dropped: Vec<_> = ui.ctx().input(|i| i.raw.dropped_files.clone());
-        if let Some(file) = dropped.first() {
-            let path = file.path().to_string_lossy().into_owned();
-            if !path.is_empty() {
-                self.path = path;
-                self.load_file();
-            }
-        }
-
         // Menu bar: the primary entry point for both workflows.
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open PE File…").clicked() {
-                        self.open_dialog(ui.ctx());
-                        ui.close();
-                    }
                     if ui.button("选择进程…").clicked() {
                         self.processes = process::list_processes().unwrap_or_default();
                         self.modules.clear();
@@ -663,34 +598,16 @@ impl eframe::App for ScyllaGui {
         let ctrl_s = ui
             .ctx()
             .input(|i| i.modifiers.command && i.key_pressed(egui::Key::S));
-        let ctrl_o = ui
-            .ctx()
-            .input(|i| i.modifiers.command && i.key_pressed(egui::Key::O));
         if ctrl_s {
             self.save(ui.ctx());
         }
-        if ctrl_o {
-            self.open_dialog(ui.ctx());
-        }
 
-        // Document-source line: what we are working on (a file path, or a
-        // dumped process/module) plus a read-only image summary and the status.
+        // Document-source line: the dumped process/module plus a read-only
+        // image summary and the status.
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                match self.source {
-                    Source::File => {
-                        ui.label("文件:");
-                        if self.path.is_empty() {
-                            ui.weak("(未打开)");
-                        } else {
-                            ui.label(&self.path);
-                        }
-                    }
-                    Source::Dump => {
-                        ui.label("进程:");
-                        ui.label(format!("pid {} · {}", self.pid, self.dump_label));
-                    }
-                }
+                ui.label("进程:");
+                ui.label(format!("pid {} · {}", self.pid, self.dump_label));
                 if let Some(doc) = &self.doc {
                     ui.separator();
                     ui.weak(summary(doc));
@@ -703,7 +620,7 @@ impl eframe::App for ScyllaGui {
         egui::CentralPanel::default_margins().show(ui, |ui| {
             if self.doc.is_none() {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Dump a process (File → 选择进程…) or open a PE file to begin.");
+                    ui.label("Dump a process (File → 选择进程…) to begin.");
                 });
                 return;
             }
