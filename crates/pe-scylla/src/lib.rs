@@ -28,5 +28,6 @@ pub use pe_edit::error::{PeError, Result};
 
 pub use api::{
     ImportEntry, ImportModule, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports,
+    get_imports_regions,
 };
 pub use io::tree::{TreeFile, load_json, load_xml, save_json, save_xml};

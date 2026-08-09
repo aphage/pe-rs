@@ -42,6 +42,7 @@ fn file() -> TreeFile {
         oep: 0x1234,
         iat_va: 0x140008000,
         iat_size: 0x80,
+        iat_regions: vec![(0x140008000, 0x80), (0x140009000, 0x40)],
         tree: sample_tree(),
     }
 }
@@ -61,6 +62,10 @@ fn json_round_trip() {
     assert_eq!(loaded.oep, 0x1234);
     assert_eq!(loaded.iat_va, 0x140008000);
     assert_eq!(loaded.iat_size, 0x80);
+    assert_eq!(
+        loaded.iat_regions,
+        vec![(0x140008000, 0x80), (0x140009000, 0x40)]
+    );
     assert_eq!(loaded.tree.total(), 6);
     assert_eq!(loaded.tree.modules.len(), 2);
     let k32 = &loaded.tree.modules[0];
@@ -82,6 +87,10 @@ fn xml_round_trip() {
 
     assert_eq!(loaded.oep, 0x1234);
     assert_eq!(loaded.iat_va, 0x140008000);
+    assert_eq!(
+        loaded.iat_regions,
+        vec![(0x140008000, 0x80), (0x140009000, 0x40)]
+    );
     assert_eq!(loaded.tree.total(), 6);
     assert_eq!(loaded.tree.modules[0].name, "kernel32.dll");
     assert_eq!(loaded.tree.modules[0].entries.len(), 5);

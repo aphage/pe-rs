@@ -18,6 +18,9 @@ pub struct TreeFile {
     pub oep: u32,
     pub iat_va: u64,
     pub iat_size: usize,
+    /// The full IAT region list (a sliced / scattered IAT has several).
+    /// `iat_va`/`iat_size` are kept as the first region for readability.
+    pub iat_regions: Vec<(u64, usize)>,
     pub tree: ImportsTree,
 }
 
@@ -55,7 +58,14 @@ fn ser_json(file: &TreeFile) -> Result<String> {
     let _ = write!(out, "{}", file.iat_va);
     out.push_str(",\"iat_size\":");
     let _ = write!(out, "{}", file.iat_size);
-    out.push_str(",\"modules\":[");
+    out.push_str(",\"iat_regions\":[");
+    for (i, (va, size)) in file.iat_regions.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "[{va},{size}]");
+    }
+    out.push_str("],\"modules\":[");
     for (i, m) in file.tree.modules.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -151,12 +161,20 @@ fn de_json(text: &str) -> Result<TreeFile> {
             file.iat_size = p.number()? as usize;
             Ok(())
         }
+        "iat_regions" => {
+            file.iat_regions = p.regions()?;
+            Ok(())
+        }
         "modules" => {
             file.tree = p.modules()?;
             Ok(())
         }
         _ => p.skip_value(),
     })?;
+    // Backward compat: an old single-region file has no "iat_regions".
+    if file.iat_regions.is_empty() && (file.iat_va != 0 || file.iat_size != 0) {
+        file.iat_regions.push((file.iat_va, file.iat_size));
+    }
     Ok(file)
 }
 
@@ -359,6 +377,17 @@ impl<'a> JsonParser<'a> {
             }
         }
     }
+    fn regions(&mut self) -> Result<Vec<(u64, usize)>> {
+        self.array(|p| {
+            p.expect(b'[')?;
+            p.skip_ws();
+            let va = p.number()?;
+            p.expect(b',')?;
+            let size = p.number()? as usize;
+            p.expect(b']')?;
+            Ok((va, size))
+        })
+    }
     fn modules(&mut self) -> Result<ImportsTree> {
         let modules = self.array(|p| {
             let mut module = ImportModule {
@@ -444,6 +473,13 @@ fn ser_xml(file: &TreeFile) -> String {
         "<Scylla oep=\"0x{:x}\" iat_va=\"0x{:x}\" iat_size=\"0x{:x}\">",
         file.oep, file.iat_va, file.iat_size
     );
+    if !file.iat_regions.is_empty() {
+        out.push_str("  <IatRegions>\n");
+        for (va, size) in &file.iat_regions {
+            let _ = writeln!(out, "    <Region va=\"0x{:x}\" size=\"0x{:x}\"/>", va, size);
+        }
+        out.push_str("  </IatRegions>\n");
+    }
     for m in &file.tree.modules {
         let _ = writeln!(
             out,
@@ -490,6 +526,30 @@ fn de_xml(text: &str) -> Result<TreeFile> {
     let attr_u64 = |tag: &str, name: &str| attr(tag, name).and_then(|s| parse_hex(&s));
 
     while i < b.len() {
+        if peek(i, b"<IatRegions") {
+            // skip to past the <IatRegions> opening tag
+            i = text[i..].find('>').map(|e| i + e + 1).unwrap_or(b.len());
+            loop {
+                if peek(i, b"</IatRegions") {
+                    i = text[i..].find('>').map(|e| i + e + 1).unwrap_or(b.len());
+                    break;
+                }
+                if !peek(i, b"<Region") {
+                    i += 1;
+                    if i >= b.len() {
+                        break;
+                    }
+                    continue;
+                }
+                let e = text[i..].find('>').map(|e| i + e).unwrap_or(b.len());
+                let tag = &text[i + 1..e];
+                let va = attr_u64(tag, "va").unwrap_or(0);
+                let size = attr_u64(tag, "size").unwrap_or(0) as usize;
+                file.iat_regions.push((va, size));
+                i = e + 1;
+            }
+            continue;
+        }
         if !peek(i, b"<Module") {
             i += 1;
             continue;
@@ -550,6 +610,10 @@ fn de_xml(text: &str) -> Result<TreeFile> {
         file.oep = attr_u64(tag, "oep").unwrap_or(0) as u32;
         file.iat_va = attr_u64(tag, "iat_va").unwrap_or(0);
         file.iat_size = attr_u64(tag, "iat_size").unwrap_or(0) as usize;
+    }
+    // Backward compat: an old single-region file has no <IatRegions>.
+    if file.iat_regions.is_empty() && (file.iat_va != 0 || file.iat_size != 0) {
+        file.iat_regions.push((file.iat_va, file.iat_size));
     }
     Ok(file)
 }

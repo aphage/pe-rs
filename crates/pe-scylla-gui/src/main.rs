@@ -11,7 +11,9 @@
 use eframe::egui;
 use pe_edit::domain::{IatFixOptions, IatFixReport, IatScan, ScanMethod, ScanOptions};
 use pe_edit::io::pe::serialize;
-use pe_scylla::api::{IatScanner, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports};
+use pe_scylla::api::{
+    IatScanner, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports_regions,
+};
 use pe_scylla::io::tree::{TreeFile, load_json, load_xml, save_json, save_xml};
 use pe_scylla::process::{self, ModuleInfo, ProcessInfo, ProcessResolver};
 use std::path::Path;
@@ -131,11 +133,14 @@ struct ScyllaGui {
     /// Scan method used by "Scan IAT" (Resolver / Code references /
     /// Reflection — see `ScanMethod`).
     scan_method: ScanMethod,
-    /// Scylla fields: original entry point (RVA) and the IAT address (VA) /
-    /// size (bytes), typed by hand or filled by Scan IAT.
+    /// Scylla fields: original entry point (RVA) and the **IAT regions** — a
+    /// normal IAT is one `(va, size)`, a sliced/scattered IAT is several,
+    /// added by hand. Filled by Scan IAT / IAT Auto, editable in the list.
     oep: String,
-    iat_va: String,
-    iat_size: String,
+    iat_regions: Vec<(u64, usize)>,
+    /// "Add IAT region" input fields.
+    iat_region_va: String,
+    iat_region_size: String,
     /// The Get Imports result: a curated per-module import tree.
     tree: Option<ImportsTree>,
     /// One "keep" flag per tree entry (flattened module → entry order);
@@ -232,8 +237,12 @@ impl ScyllaGui {
             Ok(scan) => {
                 let psize = pe_edit::domain::types::ptr_size(doc.arch);
                 let base_va = resolver.image_base;
-                self.iat_va = format!("{:#x}", base_va + scan.base_rva.get() as u64);
-                self.iat_size = format!("{:#x}", scan.entries.len() * psize);
+                // A scan finds one contiguous region; replace the list with it.
+                self.iat_regions.clear();
+                self.iat_regions.push((
+                    base_va + scan.base_rva.get() as u64,
+                    scan.entries.len() * psize,
+                ));
                 self.status = format!(
                     "scan ({}) — IAT at {:#x}, {} entries",
                     scan_method_name(method),
@@ -249,25 +258,26 @@ impl ScyllaGui {
         }
     }
 
-    /// Scylla's "Get Imports": read the live process's IAT at the address/size
-    /// fields and resolve it into the import tree.
+    /// Scylla's "Get Imports": read the live process's IAT region(s) and
+    /// resolve every thunk into the import tree. A sliced IAT is covered by
+    /// several regions added by hand.
     fn get_imports(&mut self) {
         let (Some(resolver), Some(_doc)) = (self.resolver.as_ref(), self.doc.as_ref()) else {
             self.status = "no process — dump a process first".into();
             return;
         };
+        if self.iat_regions.is_empty() {
+            self.status = "add at least one IAT region (or Scan IAT / IAT Auto)".into();
+            return;
+        }
         let pid = self.pid.parse::<u32>().unwrap_or(0);
-        let Some(iat_va) = parse_hex64(&self.iat_va) else {
-            self.status = "invalid IAT address".into();
-            return;
-        };
-        let Some(iat_size) = parse_hex64(&self.iat_size).map(|v| v as usize) else {
-            self.status = "invalid IAT size".into();
-            return;
-        };
         // An IAT size of 0 means "a few pointers" — default to 0x100 bytes.
-        let iat_size = if iat_size == 0 { 0x100 } else { iat_size };
-        match get_imports(pid, resolver, iat_va, iat_size) {
+        let regions: Vec<(u64, usize)> = self
+            .iat_regions
+            .iter()
+            .map(|&(va, size)| (va, if size == 0 { 0x100 } else { size }))
+            .collect();
+        match get_imports_regions(pid, resolver, &regions) {
             Ok(tree) => {
                 let n = tree.total();
                 self.tree_keep = vec![true; n];
@@ -341,8 +351,9 @@ impl ScyllaGui {
         let start = resolver.image_base + oep_rva;
         match process::search_iat(pid, start, self.advanced_search) {
             Ok(Some((va, size))) => {
-                self.iat_va = format!("{va:#x}");
-                self.iat_size = format!("{size:#x}");
+                // Autosearch finds one region; replace the list with it.
+                self.iat_regions.clear();
+                self.iat_regions.push((va, size));
                 self.status = format!(
                     "IAT autosearch — VA {va:#x} RVA {:#x} size {size}",
                     va.saturating_sub(resolver.image_base)
@@ -474,8 +485,9 @@ impl ScyllaGui {
         };
         let file = TreeFile {
             oep: parse_hex64(&self.oep).unwrap_or(0) as u32,
-            iat_va: parse_hex64(&self.iat_va).unwrap_or(0),
-            iat_size: parse_hex64(&self.iat_size).unwrap_or(0) as usize,
+            iat_va: self.iat_regions.first().map(|r| r.0).unwrap_or(0),
+            iat_size: self.iat_regions.first().map(|r| r.1).unwrap_or(0),
+            iat_regions: self.iat_regions.clone(),
             tree: tree.clone(),
         };
         let res = if path.ends_with(".json") {
@@ -503,11 +515,10 @@ impl ScyllaGui {
                 if file.oep != 0 {
                     self.oep = format!("{:#x}", file.oep);
                 }
-                if file.iat_va != 0 {
-                    self.iat_va = format!("{:#x}", file.iat_va);
-                }
-                if file.iat_size != 0 {
-                    self.iat_size = format!("{:#x}", file.iat_size);
+                if !file.iat_regions.is_empty() {
+                    self.iat_regions = file.iat_regions;
+                } else if file.iat_va != 0 {
+                    self.iat_regions = vec![(file.iat_va, file.iat_size)];
                 }
                 self.log_line(format!("loaded import tree from {path}"));
             }
@@ -911,14 +922,54 @@ impl ScyllaGui {
             ui.label("OEP:");
             ui.add(egui::TextEdit::singleline(&mut self.oep).desired_width(90.0))
                 .on_hover_text("Original entry point (RVA) written by Fix Dump");
-            ui.label("IAT VA:");
-            ui.add(egui::TextEdit::singleline(&mut self.iat_va).desired_width(120.0))
-                .on_hover_text("IAT address (VA) in the target process");
-            ui.label("IAT Size:");
-            ui.add(egui::TextEdit::singleline(&mut self.iat_size).desired_width(80.0))
-                .on_hover_text("IAT size in bytes");
+        });
+        // IAT regions: a normal IAT is one (VA, size); a sliced / scattered
+        // IAT is several non-contiguous regions, added by hand.
+        ui.horizontal(|ui| {
+            ui.label("IAT:");
+            let mut remove: Option<usize> = None;
+            for (i, (va, size)) in self.iat_regions.iter().enumerate() {
+                ui.monospace(format!("{va:#x}:{size:#x}"));
+                if ui.small_button(format!("×{i}")).clicked() {
+                    remove = Some(i);
+                }
+            }
+            if let Some(i) = remove {
+                self.iat_regions.remove(i);
+            }
+            if self.iat_regions.is_empty() {
+                ui.weak("(no regions — Scan IAT / IAT Auto or add below)");
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Add:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.iat_region_va)
+                    .hint_text("VA")
+                    .desired_width(110.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.iat_region_size)
+                    .hint_text("size")
+                    .desired_width(70.0),
+            );
+            if ui.button("Add region").clicked() {
+                let va = parse_hex64(&self.iat_region_va);
+                let size = parse_hex64(&self.iat_region_size).map(|v| v as usize);
+                match (va, size) {
+                    (Some(va), Some(size)) => {
+                        self.iat_regions.push((va, size));
+                        self.iat_region_va.clear();
+                        self.iat_region_size.clear();
+                        self.status = format!("added IAT region {va:#x}:{size:#x}");
+                    }
+                    _ => self.status = "region needs VA and size (hex)".into(),
+                }
+            }
+        });
 
-            ui.separator();
+        ui.separator();
+        ui.horizontal(|ui| {
             ui.label("Method:");
             egui::ComboBox::from_id_salt("scan_method")
                 .selected_text(scan_method_name(self.scan_method))
@@ -933,7 +984,7 @@ impl ScyllaGui {
                 });
             if ui
                 .add_enabled(has_resolver, egui::Button::new("Scan IAT"))
-                .on_hover_text("Scan the dumped image to find the IAT; fills IAT VA/Size")
+                .on_hover_text("Scan the dumped image to find the IAT; fills the IAT region")
                 .clicked()
             {
                 self.scan_iat();
@@ -941,7 +992,7 @@ impl ScyllaGui {
             if ui
                 .add_enabled(has_resolver, egui::Button::new("IAT Auto"))
                 .on_hover_text(
-                    "Autosearch the IAT in the live process (from the OEP); fills IAT VA/Size",
+                    "Autosearch the IAT in the live process (from the OEP); fills the IAT region",
                 )
                 .clicked()
             {
@@ -968,10 +1019,10 @@ impl ScyllaGui {
             None => {
                 if self.scan.is_some() {
                     ui.label(
-                        "IAT found — set IAT VA/Size (or keep the scan result) and click Get Imports.",
+                        "IAT found — keep the scan region (or add more) and click Get Imports.",
                     );
                 } else {
-                    ui.label("Dump a process, find the IAT (Scan IAT or type IAT VA/Size), then Get Imports.");
+                    ui.label("Dump a process, find the IAT (Scan IAT / IAT Auto or add regions), then Get Imports.");
                 }
             }
             Some(tree) => show_tree(ui, tree, &mut self.tree_keep),

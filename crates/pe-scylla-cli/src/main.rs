@@ -317,6 +317,7 @@ fn save_tree(path: &str, iat_va: u64, iat_size: usize, tree: &ImportsTree) {
         oep: 0,
         iat_va,
         iat_size,
+        iat_regions: vec![(iat_va, iat_size)],
         tree: tree.clone(),
     };
     let res = if path.ends_with(".json") {
