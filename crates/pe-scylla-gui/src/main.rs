@@ -820,96 +820,141 @@ impl eframe::App for ScyllaGui {
             }
         }
 
-        // Options dialog: Scylla's tunable flags.
+        // Options dialog: Scylla's tunable flags, in its own native window.
+        let mut close_options = false;
         if self.show_options {
-            egui::Window::new("Options")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.checkbox(&mut self.suspend_before_dump, "Suspend process for dumping");
-                    ui.checkbox(&mut self.advanced_search, "Advanced IAT search");
-                    ui.checkbox(&mut self.scan_direct_imports, "Scan direct imports");
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        self.show_options = false;
+            let ctx = ui.ctx().clone();
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("options_viewport"),
+                egui::ViewportBuilder::default()
+                    .with_title("Options")
+                    .with_resizable(false),
+                |ui, _class| {
+                    if ui.ctx().input(|i| i.viewport().close_requested())
+                        || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        close_options = true;
                     }
-                });
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.checkbox(&mut self.suspend_before_dump, "Suspend process for dumping");
+                        ui.checkbox(&mut self.advanced_search, "Advanced IAT search");
+                        ui.checkbox(&mut self.scan_direct_imports, "Scan direct imports");
+                        ui.separator();
+                        if ui.button("Close").clicked() {
+                            close_options = true;
+                        }
+                    });
+                },
+            );
+            if close_options {
+                self.show_options = false;
+            }
         }
 
-        // Disassembler view: disassemble a section of the working image.
+        // Disassembler view: disassemble a section, in its own native window.
+        let mut close_disasm = false;
         if self.show_disasm {
-            let mut close = false;
-            egui::Window::new("Disassembler")
-                .default_width(620.0)
-                .show(ui.ctx(), |ui| {
-                    if let Some(doc) = self.doc.as_ref() {
-                        ui.horizontal(|ui| {
-                            ui.label("Section:");
-                            egui::ComboBox::from_id_salt("disasm_sec")
-                                .selected_text(format!(
-                                    "#{} {}",
-                                    self.disasm_section,
-                                    doc.sections
-                                        .get(self.disasm_section)
-                                        .map(|s| s.name_str())
-                                        .unwrap_or_else(|| "?".to_string())
-                                ))
-                                .show_ui(ui, |ui| {
-                                    for i in 0..doc.sections.len() {
-                                        ui.selectable_value(
-                                            &mut self.disasm_section,
-                                            i,
-                                            format!("#{i} {}", doc.sections[i].name_str()),
-                                        );
+            let ctx = ui.ctx().clone();
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("disasm_viewport"),
+                egui::ViewportBuilder::default()
+                    .with_title("Disassembler")
+                    .with_inner_size([620.0, 480.0])
+                    .with_resizable(true),
+                |ui, _class| {
+                    if ui.ctx().input(|i| i.viewport().close_requested())
+                        || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        close_disasm = true;
+                    }
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        if let Some(doc) = self.doc.as_ref() {
+                            ui.horizontal(|ui| {
+                                ui.label("Section:");
+                                egui::ComboBox::from_id_salt("disasm_sec")
+                                    .selected_text(format!(
+                                        "#{} {}",
+                                        self.disasm_section,
+                                        doc.sections
+                                            .get(self.disasm_section)
+                                            .map(|s| s.name_str())
+                                            .unwrap_or_else(|| "?".to_string())
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        for i in 0..doc.sections.len() {
+                                            ui.selectable_value(
+                                                &mut self.disasm_section,
+                                                i,
+                                                format!("#{i} {}", doc.sections[i].name_str()),
+                                            );
+                                        }
+                                    });
+                            });
+                            if let Ok(lines) = pe_scylla::feature::disassemble_section(
+                                doc,
+                                self.disasm_section,
+                                500,
+                            ) {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    for line in lines {
+                                        ui.monospace(line);
                                     }
                                 });
-                        });
-                        if let Ok(lines) =
-                            pe_scylla::feature::disassemble_section(doc, self.disasm_section, 500)
-                        {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                for line in lines {
-                                    ui.monospace(line);
-                                }
-                            });
+                            }
+                        } else {
+                            ui.label("no document");
                         }
-                    } else {
-                        ui.label("no document");
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
-                });
-            if close {
+                        if ui.button("Close").clicked() {
+                            close_disasm = true;
+                        }
+                    });
+                },
+            );
+            if close_disasm {
                 self.show_disasm = false;
             }
         }
 
         // Save-time confirmation: the import table looks broken, the user can
-        // still force the save.
+        // still force the save. Shown in its own native window.
+        let mut close_save = false;
         if self.save_warning.is_some() {
-            egui::Window::new("Confirm save")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label("导入表可能损坏,保存的文件可能无法正常运行:");
-                    if let Some(warn) = &self.save_warning {
-                        ui.label(warn);
+            let ctx = ui.ctx().clone();
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("confirm_save_viewport"),
+                egui::ViewportBuilder::default()
+                    .with_title("Confirm save")
+                    .with_resizable(false),
+                |ui, _class| {
+                    if ui.ctx().input(|i| i.viewport().close_requested())
+                        || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        close_save = true;
                     }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("仍然保存").clicked() {
-                            if let Some(path) = self.pending_save_path.take() {
-                                self.write_file(path);
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.label("导入表可能损坏,保存的文件可能无法正常运行:");
+                        if let Some(warn) = &self.save_warning {
+                            ui.label(warn);
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("仍然保存").clicked() {
+                                if let Some(path) = self.pending_save_path.take() {
+                                    self.write_file(path);
+                                }
+                                close_save = true;
                             }
-                            self.save_warning = None;
-                        }
-                        if ui.button("取消").clicked() {
-                            self.save_warning = None;
-                            self.pending_save_path = None;
-                        }
+                            if ui.button("取消").clicked() {
+                                close_save = true;
+                            }
+                        });
                     });
-                });
+                },
+            );
+            if close_save {
+                self.save_warning = None;
+                self.pending_save_path = None;
+            }
         }
     }
 }
