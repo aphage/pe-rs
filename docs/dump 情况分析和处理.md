@@ -2,6 +2,12 @@
 
 本文档描述 pe-rs 对"从内存 dump 出来的 PE 修复导入表"的处理流程:为什么找 IAT、各情形用哪条扫描线、如何把地址恢复成 (模块, 函数) 重建导入表。**代码反向映射**——每个分支标注实际实现入口(函数 + 文件)。
 
+> 代码位置(2026-08 重构后,workspace 拆成两套 API):下述流程实现位于
+> `crates/pe-scylla/src`(`api/iat_scanner.rs`、`api/iat_fixer.rs`、
+> `feature/rebase.rs`、`process/mod.rs`),依赖 `crates/pe-edit` 的镜像模型
+> `PeDocument` 与 `io::pe` 的 parse/serialize。文中 `api/…` 均指
+> `crates/pe-scylla/src/api/…`。
+
 ## 0. 完整管线(代码)
 
 ```
@@ -83,7 +89,7 @@ ScanMethod::CodeReference     # §3
   1. **落在某已加载模块范围内** → `(address - base)` 查导出表偏移 → `(module, function)`。
   2. **不在任何已知模块**(可能是手动映射的内存加载模块):
      - 读该地址的代码字节,与系统加载副本的导出**代码指纹**比对(`resolve_fingerprint`:前 8 字节索引 + 16 字节验证)。
-     - 内存模块代码与系统副本逐字节一致,即使 PE 头被擦也能识别;代价是要求系统里有**同一 DLL 的已加载副本**。文档原设计是"对原模块导出表遍历匹配 / 读内存模块自己的导出表"——pe-rs 用代码指纹取代,对擦头场景更稳,但"只有内存模块无原模块"的自定义 DLL 识别不了(落到 unresolved)。
+     - 内存模块代码与系统副本逐字节一致,即使 PE 头被擦也能识别;代价是要求系统里有**同一 DLL 的已加载副本**。文档原设计是"对原模块导出表遍历匹配 / 读内存模块自己的导出表"——pe-scylla 用代码指纹取代,对擦头场景更稳,但"只有内存模块无原模块"的自定义 DLL 识别不了(落到 unresolved)。
 
 ## 3. 扫描代码搜索 IAT(代码引用)
 

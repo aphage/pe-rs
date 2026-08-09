@@ -1,5 +1,5 @@
 //! A plain `std` program that reproduces the runtime-written-pointer problem
-//! `pe_rs::feature::rebase_dump` addresses: `CACHED` is a `.data` slot whose
+//! `pe_scylla::feature::rebase_dump` addresses: `CACHED` is a `.data` slot whose
 //! initializer points into the image (so the linker registers a relocation
 //! entry), and at runtime the program overwrites it with an *external* absolute
 //! pointer (`GetProcAddress("GetTickCount")`).

@@ -153,7 +153,7 @@ const SCRATCH_SLOTS: usize = 2048;
 const GAP: usize = 8; // slots of padding between per-module scatter blocks
 
 // ---------------------------------------------------------------------------
-// Relocation-pollution demo (validates `pe_rs::feature::rebase_dump`).
+// Relocation-pollution demo (validates `pe_scylla::feature::rebase_dump`).
 // ---------------------------------------------------------------------------
 
 /// A `.data` slot whose initializer points into the image, so the linker

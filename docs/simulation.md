@@ -2,10 +2,10 @@
 
 `crates/sim-target` 模拟真实的 Scylla 工作流:一个**自毁目标程序**(`sim-target`
 bin)按 `dump 情况分析和处理.md` 的四种情形破坏自身内存后**暂停自己**(如同被
-调试器断点暂停),然后由**独立的 pe dump 工具**(`pe-rs` 的 `examples/dump.rs`)
+调试器断点暂停),然后由**独立的 pe dump 工具**(`pe-scylla-cli` 的 `pe-scylla` bin)
 对暂停的进程做 dump → 扫描 → 修复导入表 → 落盘,最后把修复产物**再运行**验证。
 
-目标程序与 dump 工具是两个完全独立的可执行文件:目标不依赖 pe-rs,dump 工具
+目标程序与 dump 工具是两个完全独立的可执行文件:目标不依赖 pe-scylla,dump 工具
 不认识目标(只认 pid)。这正是真实环境的样子——被保护的程序被调试器停住,
 Scylla 类工具 attach 它并修复。
 
@@ -36,13 +36,13 @@ Scylla 类工具 attach 它并修复。
 
 ## 修复产物如何做到可运行
 
-为了"修复后 dump 独立运行",pe-rs 侧做了三处配套改动:
+为了"修复后 dump 独立运行",pe-scylla 侧做了三处配套改动:
 
 1. **就地重建 IAT**(`fix_iat` + `IatFixOptions::reuse_iat_slots`,默认开):
    当每个模块的槽连续时,重建的描述符 `FirstThunk` 直接指回**原 IAT 槽 RVA**,
    loader 把名字解析出的地址写进代码真正引用的那些槽(`call [rip+disp]` 落点)。
    含槽的节标记 `IMAGE_SCN_MEM_WRITE`。若槽不连续,回退为把代码引用改写去新表。
-2. **代码引用改写**(`PeDocument::remap_iat_references`):把可执行节里所有指向
+2. **代码引用改写**(`pe_scylla::api::iat_scanner::remap_iat_references`):把可执行节里所有指向
    旧 IAT 槽的 direct-memory 操作数(`call/jmp/mov/lea [rip+disp]`)的位移改写为
    新表槽位。就地模式无法成立(槽分散/交错)时,用它在重建后把代码指到新 IAT。
 3. **writer 保留 bss/raw 边界**:dump 是按 `virtual_size` 读节的,未初始化的
@@ -58,7 +58,7 @@ Scylla 类工具 attach 它并修复。
 - **运行期写的外部指针**(如 `GetProcAddress` 结果,但槽被 `.reloc` 覆盖):dump 保留
   旧进程地址,新进程加载时 loader 照 `.reloc` 项再加一次重定位增量 → 变成垃圾。
 
-`pe_rs::feature::rebase_dump(doc, preferred_base)` 遍历 `DataDirectory[BaseReloc]`
+`pe_scylla::feature::rebase_dump(doc, preferred_base)` 遍历 `DataDirectory[BaseReloc]`
 的每个槽,按值分类:
 
 - 值在 `[实际基址, 实际基址 + size_of_image)` 内 → 镜像内指针 → rebase 回
@@ -79,14 +79,14 @@ Scylla 类工具 attach 它并修复。
 ```text
 # 构建目标程序与 dump 工具
 cargo build -p sim-target
-cargo build -p pe-rs --example dump
+cargo build -p pe-scylla-cli
 
 # 1. 启动目标:按场景自毁,打印 SIM_TARGET_READY:<pid> 后暂停(像被调试器停住)
 ./target/debug/sim-target.exe corrupt erased
 
 # 2. 用独立的 pe dump 工具 dump + 修复 + 落盘(它只认 pid,不认识目标)
 #    --rebase 重建 .reloc,处理运行期写进 .data 的绝对指针
-cargo run -p pe-rs --example dump -- <pid> fixed.exe --method code --rebase
+cargo run -p pe-scylla-cli -- <pid> fixed.exe --method code --rebase
 # 3. 运行修复产物验证(打印 SIM_TARGET_OK,退出 0)
 ./fixed.exe verify
 
@@ -118,12 +118,12 @@ cargo test -p sim-target -- --ignored
 
 对真实程序,正确的 dump 时机是**调试器在 PE 入口点断下**——程序被系统完整加载
 (重定位、导入、TLS 就绪,`.data`/`.bss` 是初始状态),但还没执行任何程序代码。
-`pe_rs::process::spawn_paused(exe, args)` 用调试 API(`CreateProcessW` +
+`pe_scylla::process::spawn_paused(exe, args)` 用调试 API(`CreateProcessW` +
 `DEBUG_ONLY_THIS_PROCESS`)创建目标,在入口点写一个 `INT 3` 断点并一路继续,直到
 程序停在入口:返回 `PausedProcess`(Drop 时终止并分离调试器)。示例:
 
 ```text
-cargo run -p pe-rs --example spawn_dump -- <exe> <out> [--method ...] [--rebase] [-- <args...>]
+cargo run -p pe-scylla --example spawn_dump -- <exe> <out> [--method ...] [--rebase] [-- <args...>]
 ```
 
 在这个状态下 dump,运行期懒写的外部指针**为零**(`rebase_dump` 报告
