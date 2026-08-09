@@ -1,0 +1,18 @@
+[package]
+name = "pe-edit"
+description = "Disk PE file editing library (CFF-Explorer benchmark): parse, view and edit PE files on disk (headers, sections, import/export/resource/reloc/TLS/LoadConfig directories, section merge/rebuild) and serialize back."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+windows-sys = { version = "0.61.2", features = [
+    "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_Debug",
+] }
+
+[dev-dependencies]

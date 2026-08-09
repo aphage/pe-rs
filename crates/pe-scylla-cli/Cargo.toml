@@ -1,0 +1,17 @@
+[package]
+name = "pe-scylla-cli"
+description = "CLI for the pe-scylla library: dump a (debugged) process, scan/fix its IAT, write a fixed dump (Scylla benchmark)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pe-scylla"
+path = "src/main.rs"
+
+[dependencies]
+pe-edit = { path = "../pe-edit" }
+pe-scylla = { path = "../pe-scylla" }

@@ -1,0 +1,15 @@
+[package]
+name = "pe-scylla-gui"
+description = "Scylla-style process dump / IAT fix GUI built on the pe-scylla library."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pe-edit = { path = "../pe-edit" }
+pe-scylla = { path = "../pe-scylla" }
+eframe = { version = "0.36.0", default-features = false, features = ["glow", "default_fonts"] }
+rfd = "0.17.2"

@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/pe-rs", "crates/pe-rs-gui", "crates/sim-target", "crates/std-target"]
+members = [
+    "crates/pe-edit",
+    "crates/pe-edit-cli",
+    "crates/pe-edit-gui",
+    "crates/pe-scylla",
+    "crates/pe-scylla-cli",
+    "crates/pe-scylla-gui",
+    "crates/sim-target",
+    "crates/std-target",
+]
 
 [workspace.package]
 version = "0.1.0"

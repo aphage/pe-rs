@@ -1,0 +1,22 @@
+//! The **outer layer** of the library: capability traits that a GUI (or any
+//! consumer) drives directly. Implementations operate on
+//! [`crate::domain::PeDocument`], so they work identically for mock- and
+//! real-parser-backed documents.
+//!
+//! This is the *disk editing* surface (CFF-Explorer benchmark). The Scylla
+//! side (IAT scan / fix on a dumped process) lives in the companion
+//! `pe-scylla` crate.
+
+pub mod directory_editor;
+pub mod editor;
+pub mod exporter;
+pub mod importer;
+pub mod resolver;
+pub mod viewer;
+
+pub use directory_editor::DirectoryEditor;
+pub use editor::PeEditor;
+pub use exporter::ExportTableEditor;
+pub use importer::ImportTableEditor;
+pub use resolver::{ImportResolver, ResolvedImport};
+pub use viewer::PeViewer;

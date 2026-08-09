@@ -16,8 +16,8 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
-use pe_rs::api::{IatFixer, IatScanner};
-use pe_rs::domain::{IatFixOptions, ScanMethod, ScanOptions};
+use pe_scylla::api::{IatFixer, IatScanner};
+use pe_scylla::{IatFixOptions, ScanMethod, ScanOptions};
 
 /// Spawn the target in `scenario`, wait for its readiness line, and return the
 /// (paused) child plus its pid.
@@ -81,8 +81,9 @@ fn all_scenarios_dump_fix_and_rerun() {
 
         // Standalone dump + fix, exactly what
         // `cargo run -p pe-rs --example dump -- <pid> <out> --method <...>` does.
-        let mut doc = pe_rs::process::dump(pid).expect("dump paused target");
-        let resolver = pe_rs::process::ProcessResolver::for_process(pid).expect("build resolver");
+        let mut doc = pe_scylla::process::dump(pid).expect("dump paused target");
+        let resolver =
+            pe_scylla::process::ProcessResolver::for_process(pid).expect("build resolver");
         let scan = doc.scan(&resolver, &scan_for(scenario)).expect("scan IAT");
         let report = doc
             .fix_iat(&scan, &resolver, &IatFixOptions::default())
@@ -92,7 +93,7 @@ fn all_scenarios_dump_fix_and_rerun() {
             "scenario {scenario}: {} IAT entries unresolved",
             report.unresolved.len()
         );
-        let bytes = pe_rs::io::pe::serialize(&doc).expect("serialize");
+        let bytes = pe_edit::io::pe::serialize(&doc).expect("serialize");
         std::fs::write(&out, &bytes).expect("write fixed dump");
 
         // Terminate the paused target, then run the fixed dump.
@@ -129,12 +130,12 @@ fn pollute_scenario_rebase_makes_dump_rerun() {
     let out = std::env::temp_dir().join("sim_target_pollute_fixed.exe");
 
     // Without rebase: the fixed dump must crash.
-    let mut doc = pe_rs::process::dump(pid).expect("dump paused target");
-    let resolver = pe_rs::process::ProcessResolver::for_process(pid).expect("resolver");
+    let mut doc = pe_scylla::process::dump(pid).expect("dump paused target");
+    let resolver = pe_scylla::process::ProcessResolver::for_process(pid).expect("resolver");
     let scan = doc.scan(&resolver, &scan_for("pollute")).expect("scan");
     doc.fix_iat(&scan, &resolver, &IatFixOptions::default())
         .expect("fix");
-    std::fs::write(&out, pe_rs::io::pe::serialize(&doc).expect("serialize")).expect("write");
+    std::fs::write(&out, pe_edit::io::pe::serialize(&doc).expect("serialize")).expect("write");
     let crashed = Command::new(&out)
         .arg("verify")
         .output()
@@ -143,17 +144,17 @@ fn pollute_scenario_rebase_makes_dump_rerun() {
     assert!(crashed, "without rebase the polluted slot should crash");
 
     // With rebase: the polluted slot is cleared and the fixed dump re-runs.
-    let mut doc = pe_rs::process::dump(pid).expect("dump paused target");
-    let report = pe_rs::feature::rebase_dump(&mut doc, 0x1_4000_0000).expect("rebase");
+    let mut doc = pe_scylla::process::dump(pid).expect("dump paused target");
+    let report = pe_scylla::feature::rebase_dump(&mut doc, 0x1_4000_0000).expect("rebase");
     assert!(
         report.cleared >= 1,
         "expected the runtime-written slot to be cleared, got {report:?}"
     );
-    let resolver = pe_rs::process::ProcessResolver::for_process(pid).expect("resolver");
+    let resolver = pe_scylla::process::ProcessResolver::for_process(pid).expect("resolver");
     let scan = doc.scan(&resolver, &scan_for("pollute")).expect("scan");
     doc.fix_iat(&scan, &resolver, &IatFixOptions::default())
         .expect("fix");
-    std::fs::write(&out, pe_rs::io::pe::serialize(&doc).expect("serialize")).expect("write");
+    std::fs::write(&out, pe_edit::io::pe::serialize(&doc).expect("serialize")).expect("write");
 
     let _ = target.kill();
     let _ = target.wait();

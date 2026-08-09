@@ -1,0 +1,16 @@
+[package]
+name = "pe-edit-cli"
+description = "CLI for the pe-edit library: view and edit disk PE files (CFF-Explorer benchmark)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pe-edit"
+path = "src/main.rs"
+
+[dependencies]
+pe-edit = { path = "../pe-edit" }

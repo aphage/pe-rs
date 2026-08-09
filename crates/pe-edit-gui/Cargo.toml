@@ -1,0 +1,14 @@
+[package]
+name = "pe-edit-gui"
+description = "CFF-Explorer-style disk PE editor GUI built on the pe-edit library."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pe-edit = { path = "../pe-edit" }
+eframe = { version = "0.36.0", default-features = false, features = ["glow", "default_fonts"] }
+rfd = "0.17.2"

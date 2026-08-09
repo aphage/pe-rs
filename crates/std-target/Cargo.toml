@@ -11,4 +11,4 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
-pe-rs = { path = "../pe-rs" }
+pe-scylla = { path = "../pe-scylla" }
