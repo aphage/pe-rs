@@ -14,6 +14,7 @@ pub use iat_search::search_iat;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::OnceLock;
 
 use pe_edit::api::resolver::{ImportResolver, ResolvedImport};
 use pe_edit::domain::data_directory::{DataDirectory, DataDirectoryIndex};
@@ -588,14 +589,15 @@ pub struct ProcessResolver {
     /// shlwapi), 1 = normal. Used by the duplicate-export scoring.
     priority: HashMap<String, u8>,
     /// Code fingerprint of every named export of the system-loaded modules,
-    /// used to resolve addresses in *memory-loaded* (manually mapped) modules
-    /// that the OS module list does not report. Empty unless
-    /// [`ProcessResolver::with_fingerprints`] was called.
-    fingerprints: HashMap<u64, Vec<FingerprintCandidate>>,
+    /// used to identify addresses in *memory-loaded* (manually mapped) modules
+    /// that the OS module list does not report. Built **lazily** on first
+    /// fingerprint use; [`ProcessResolver::with_fingerprints`] pre-builds it.
+    fingerprints: OnceLock<HashMap<u64, Vec<FingerprintCandidate>>>,
 }
 
 struct ModuleExports {
     base: u64,
+    size: u32,
     name: String,
     /// Offset within the module → exported function.
     functions: HashMap<u32, ImportFunction>,
@@ -622,15 +624,16 @@ impl ProcessResolver {
             modules,
             candidates,
             priority,
-            fingerprints: HashMap::new(),
+            fingerprints: OnceLock::new(),
         })
     }
 
-    /// Also record the code fingerprint of every export, enabling resolution
-    /// of addresses in memory-loaded (manually mapped) modules via
-    /// [`ProcessResolver::resolve_fingerprint`].
-    pub fn with_fingerprints(mut self) -> Result<Self> {
-        self.fingerprints = build_fingerprints(self.pid, &self.modules);
+    /// Pre-build the export code fingerprints. They are also built **lazily**
+    /// on first fingerprint use; this pays the cost up front instead.
+    pub fn with_fingerprints(self) -> Result<Self> {
+        let _ = self
+            .fingerprints
+            .get_or_init(|| build_fingerprints(self.pid, &self.modules));
         Ok(self)
     }
 
@@ -649,31 +652,54 @@ impl ProcessResolver {
     /// Resolve `address` and report whether the result is suspect (ambiguous:
     /// several exported functions share the address and scoring did not find a
     /// clear winner). Invalid addresses return `None`.
+    ///
+    /// The address is first matched against the exports of the **OS-loaded**
+    /// modules (scored when several share the address). If it is not one of
+    /// those, the resolver checks whether it lies inside a *memory-loaded*
+    /// (manually mapped) module — one the OS module list does not report — and
+    /// if so identifies it by matching its code against the fingerprint of the
+    /// system-loaded copy.
     pub fn resolve_scored(&self, address: u64) -> Option<ApiResolve> {
         if let Some(cands) = self.candidates.get(&address) {
             return score_candidates(cands, &self.priority);
         }
-        // A memory-loaded module (manual mapping) not reported by the OS:
-        // resolve by matching the code against the system-loaded copy.
-        self.resolve_fingerprint(address)
-            .map(|resolved| ApiResolve {
-                resolved,
-                suspect: false,
-            })
+        if self.in_memory_loaded_module(address) {
+            // A memory-loaded module (manual mapping) not reported by the OS:
+            // identify it by matching the code against the system-loaded copy.
+            return self
+                .resolve_fingerprint(address)
+                .map(|resolved| ApiResolve {
+                    resolved,
+                    suspect: false,
+                });
+        }
+        None
+    }
+
+    /// Whether `address` is outside every OS-loaded module range — i.e. it
+    /// plausibly belongs to a memory-loaded (manually mapped) module.
+    fn in_memory_loaded_module(&self, address: u64) -> bool {
+        !self
+            .modules
+            .iter()
+            .any(|m| address >= m.base && address < m.base + m.size as u64)
     }
 
     /// Resolve `address` by matching its code bytes against the exports of the
     /// system-loaded modules. This works for **memory-loaded** (manually
     /// mapped) modules that `EnumProcessModules` does not report — their code
     /// is byte-identical to the system copy, even if the PE header was erased.
-    /// Requires [`ProcessResolver::with_fingerprints`].
+    /// The fingerprint table is built lazily on first use.
     pub fn resolve_fingerprint(&self, address: u64) -> Option<ResolvedImport> {
         let bytes = read_memory(self.pid, address, 16).ok()?;
         if bytes.len() < 16 {
             return None;
         }
         let key = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let candidates = self.fingerprints.get(&key)?;
+        let map = self
+            .fingerprints
+            .get_or_init(|| build_fingerprints(self.pid, &self.modules));
+        let candidates = map.get(&key)?;
         for c in candidates {
             if c.prefix[8..] == bytes[8..] {
                 return Some(ResolvedImport {
@@ -859,6 +885,7 @@ unsafe fn enumerate_modules(handle: HANDLE, pid: u32) -> Result<Vec<ModuleExport
                 continue;
             }
             let base = info.lpBaseOfDll as usize as u64;
+            let size = info.SizeOfImage;
             let mut name_buf = [0u16; 256];
             let len = GetModuleBaseNameW(
                 handle,
@@ -870,6 +897,7 @@ unsafe fn enumerate_modules(handle: HANDLE, pid: u32) -> Result<Vec<ModuleExport
             let functions = read_module_exports(pid, base);
             out.push(ModuleExports {
                 base,
+                size,
                 name,
                 functions,
             });
