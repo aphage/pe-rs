@@ -708,18 +708,8 @@ impl eframe::App for ScyllaGui {
                         close_picker = true;
                     }
                     egui::CentralPanel::default().show(ui, |ui| {
-                        // Header row: title on the left, Cancel on the right.
-                        ui.horizontal(|ui| {
-                            ui.strong("选择进程");
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("取消").clicked() {
-                                        close_picker = true;
-                                    }
-                                },
-                            );
-                        });
+                        // Title row (the window's X / ESC dismiss the picker).
+                        ui.strong("选择进程");
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.label("Filter:");
@@ -978,9 +968,6 @@ impl eframe::App for ScyllaGui {
                                 if let Some(path) = self.pending_save_path.take() {
                                     self.write_file(path);
                                 }
-                                close_save = true;
-                            }
-                            if ui.button("取消").clicked() {
                                 close_save = true;
                             }
                         });
