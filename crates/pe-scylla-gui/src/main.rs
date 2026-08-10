@@ -86,8 +86,9 @@ fn summary(doc: &pe_edit::domain::PeDocument) -> String {
     .into_owned()
 }
 
-/// Parse a hex or decimal string into a `u64` (`None` when empty or invalid).
-fn parse_hex64(s: &str) -> Option<u64> {
+/// Parse a string into a `u64`: a `0x`/`0X` prefix means hexadecimal, otherwise
+/// decimal (`None` when empty or invalid).
+fn parse_u64(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -95,9 +96,7 @@ fn parse_hex64(s: &str) -> Option<u64> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).ok()
     } else {
-        u64::from_str_radix(s, 16)
-            .or_else(|_| s.parse::<u64>())
-            .ok()
+        s.parse::<u64>().ok()
     }
 }
 
@@ -187,6 +186,10 @@ struct ScyllaGui {
     selected_module: Option<usize>,
     process_filter: String,
     show_process_picker: bool,
+    /// Detached sub-windows (picker / options / disassembler / save-confirm)
+    /// whose initial centered-over-the-main-window position has been applied.
+    /// The id is removed when the dialog closes so a reopened dialog re-centers.
+    positioned_viewports: std::collections::HashSet<egui::ViewportId>,
 }
 
 impl ScyllaGui {
@@ -195,6 +198,29 @@ impl ScyllaGui {
         self.tree = None;
         self.tree_keep.clear();
         self.last_fix = None;
+    }
+
+    /// A `ViewportBuilder` for a detached sub-window, positioned centered over
+    /// the main window on its first appearance (`size` is the centering
+    /// estimate — exact for fixed-size dialogs, approximate for auto-sized
+    /// ones). Afterwards the position is left alone, so the window stays where
+    /// the user moves it instead of snapping back every frame.
+    fn sub_window_viewport(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::ViewportId,
+        size: [f32; 2],
+    ) -> egui::ViewportBuilder {
+        let mut builder = egui::ViewportBuilder::default();
+        if self.positioned_viewports.insert(id) {
+            // First appearance: center over the main window; fall back to the
+            // OS default when its geometry isn't known yet (very first frame).
+            if let Some(parent) = ctx.input(|i| i.viewport().inner_rect) {
+                builder =
+                    builder.with_position(parent.center() - egui::vec2(size[0], size[1]) / 2.0);
+            }
+        }
+        builder
     }
 
     /// Append a line to the log (bounded) and the status bar.
@@ -343,7 +369,7 @@ impl ScyllaGui {
                 }
             }
         }
-        let oep = parse_hex64(&self.oep).map(|v| v as u32);
+        let oep = parse_u64(&self.oep).map(|v| v as u32);
         match fix_iat_from_tree(doc, &fixed, &IatFixOptions::default(), oep) {
             Ok(report) => {
                 self.last_fix = Some(report.clone());
@@ -372,7 +398,7 @@ impl ScyllaGui {
             .as_ref()
             .map(|d| d.optional.address_of_entry_point().get() as u64)
             .unwrap_or(0);
-        let oep_rva = parse_hex64(&self.oep).unwrap_or(entry_rva);
+        let oep_rva = parse_u64(&self.oep).unwrap_or(entry_rva);
         let start = resolver.image_base + oep_rva;
         match process::search_iat(pid, start, self.advanced_search) {
             Ok(Some((va, size))) => {
@@ -518,7 +544,7 @@ impl ScyllaGui {
             return;
         };
         let file = TreeFile {
-            oep: parse_hex64(&self.oep).unwrap_or(0) as u32,
+            oep: parse_u64(&self.oep).unwrap_or(0) as u32,
             iat_va: self.iat_regions.first().map(|r| r.0).unwrap_or(0),
             iat_size: self.iat_regions.first().map(|r| r.1).unwrap_or(0),
             iat_regions: self.iat_regions.clone(),
@@ -708,10 +734,14 @@ impl eframe::App for ScyllaGui {
             let ctx = ui.ctx().clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("process_picker_viewport"),
-                egui::ViewportBuilder::default()
-                    .with_title(t!("window.pick_process"))
-                    .with_inner_size([760.0, 480.0])
-                    .with_resizable(true),
+                self.sub_window_viewport(
+                    ui.ctx(),
+                    egui::ViewportId::from_hash_of("process_picker_viewport"),
+                    [760.0, 480.0],
+                )
+                .with_title(t!("window.pick_process"))
+                .with_inner_size([760.0, 480.0])
+                .with_resizable(true),
                 |ui, _class| {
                     // The user closed the window (X / Alt+F4) or pressed ESC.
                     if ui.ctx().input(|i| i.viewport().close_requested())
@@ -858,6 +888,8 @@ impl eframe::App for ScyllaGui {
             );
             if close_picker {
                 self.show_process_picker = false;
+                self.positioned_viewports
+                    .remove(&egui::ViewportId::from_hash_of("process_picker_viewport"));
             }
         }
 
@@ -867,9 +899,13 @@ impl eframe::App for ScyllaGui {
             let ctx = ui.ctx().clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("options_viewport"),
-                egui::ViewportBuilder::default()
-                    .with_title(t!("window.options"))
-                    .with_resizable(false),
+                self.sub_window_viewport(
+                    ui.ctx(),
+                    egui::ViewportId::from_hash_of("options_viewport"),
+                    [300.0, 160.0],
+                )
+                .with_title(t!("window.options"))
+                .with_resizable(false),
                 |ui, _class| {
                     if ui.ctx().input(|i| i.viewport().close_requested())
                         || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
@@ -892,6 +928,8 @@ impl eframe::App for ScyllaGui {
             );
             if close_options {
                 self.show_options = false;
+                self.positioned_viewports
+                    .remove(&egui::ViewportId::from_hash_of("options_viewport"));
             }
         }
 
@@ -901,10 +939,14 @@ impl eframe::App for ScyllaGui {
             let ctx = ui.ctx().clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("disasm_viewport"),
-                egui::ViewportBuilder::default()
-                    .with_title(t!("window.disasm"))
-                    .with_inner_size([620.0, 480.0])
-                    .with_resizable(true),
+                self.sub_window_viewport(
+                    ui.ctx(),
+                    egui::ViewportId::from_hash_of("disasm_viewport"),
+                    [620.0, 480.0],
+                )
+                .with_title(t!("window.disasm"))
+                .with_inner_size([620.0, 480.0])
+                .with_resizable(true),
                 |ui, _class| {
                     if ui.ctx().input(|i| i.viewport().close_requested())
                         || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
@@ -956,6 +998,8 @@ impl eframe::App for ScyllaGui {
             );
             if close_disasm {
                 self.show_disasm = false;
+                self.positioned_viewports
+                    .remove(&egui::ViewportId::from_hash_of("disasm_viewport"));
             }
         }
 
@@ -966,9 +1010,13 @@ impl eframe::App for ScyllaGui {
             let ctx = ui.ctx().clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("confirm_save_viewport"),
-                egui::ViewportBuilder::default()
-                    .with_title(t!("window.confirm_save"))
-                    .with_resizable(false),
+                self.sub_window_viewport(
+                    ui.ctx(),
+                    egui::ViewportId::from_hash_of("confirm_save_viewport"),
+                    [620.0, 140.0],
+                )
+                .with_title(t!("window.confirm_save"))
+                .with_resizable(false),
                 |ui, _class| {
                     if ui.ctx().input(|i| i.viewport().close_requested())
                         || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
@@ -995,6 +1043,8 @@ impl eframe::App for ScyllaGui {
             if close_save {
                 self.save_warning = None;
                 self.pending_save_path = None;
+                self.positioned_viewports
+                    .remove(&egui::ViewportId::from_hash_of("confirm_save_viewport"));
             }
         }
     }
@@ -1040,8 +1090,8 @@ impl ScyllaGui {
                     .desired_width(70.0),
             );
             if ui.button(t!("workflow.add_region")).clicked() {
-                let va = parse_hex64(&self.iat_region_va);
-                let size = parse_hex64(&self.iat_region_size).map(|v| v as usize);
+                let va = parse_u64(&self.iat_region_va);
+                let size = parse_u64(&self.iat_region_size).map(|v| v as usize);
                 match (va, size) {
                     (Some(va), Some(size)) => {
                         self.iat_regions.push((va, size));
@@ -1324,30 +1374,41 @@ impl ScyllaGui {
             egui::Id::new("binary_ctx"),
             egui::Sense::click(),
         );
-        ctx.context_menu(|ui| {
-            ui.label(t!("binary.jump_label"));
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(binary_jump).desired_width(120.0));
-                if ui.button(t!("binary.go")).clicked() {
-                    if let Some(v) = parse_hex64(binary_jump) {
-                        *binary_scroll_to = Some(parse_jump_target(v, image_base, base, len));
-                        jump_requested = true;
+        // The jump input is typed inside the menu, so it must survive clicks on
+        // the text box: the default CloseOnClick would dismiss the menu the
+        // moment the box is focused. CloseOnClickOutside still closes it when
+        // clicking elsewhere; the Go / jump buttons close via `ui.close()`.
+        egui::Popup::context_menu(&ctx)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.label(t!("binary.jump_label"));
+                ui.horizontal(|ui| {
+                    let edit = ui.add(egui::TextEdit::singleline(binary_jump).desired_width(120.0));
+                    let go = ui.button(t!("binary.go"));
+                    // Enter in the box submits too (single-line edits surrender
+                    // focus on Enter, which is how we detect it here).
+                    let submitted = go.clicked()
+                        || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if submitted {
+                        if let Some(v) = parse_u64(binary_jump) {
+                            *binary_scroll_to = Some(parse_jump_target(v, image_base, base, len));
+                            jump_requested = true;
+                        }
+                        ui.close();
                     }
+                });
+                ui.separator();
+                if ui.button(t!("binary.jump_start")).clicked() {
+                    *binary_scroll_to = Some(base);
+                    jump_requested = true;
+                    ui.close();
+                }
+                if ui.button(t!("binary.jump_end")).clicked() {
+                    *binary_scroll_to = Some(base + len.saturating_sub(1) as u32);
+                    jump_requested = true;
                     ui.close();
                 }
             });
-            ui.separator();
-            if ui.button(t!("binary.jump_start")).clicked() {
-                *binary_scroll_to = Some(base);
-                jump_requested = true;
-                ui.close();
-            }
-            if ui.button(t!("binary.jump_end")).clicked() {
-                *binary_scroll_to = Some(base + len.saturating_sub(1) as u32);
-                jump_requested = true;
-                ui.close();
-            }
-        });
         // Consume the one-shot jump unless a new one was requested this frame.
         if !jump_requested {
             *binary_scroll_to = None;
@@ -1474,16 +1535,21 @@ fn show_imports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
         ui.label(t!("empty.no_imports"));
         return;
     }
-    for d in &doc.imports {
-        egui::CollapsingHeader::new(format!("{} ({})", d.name, d.functions.len()))
-            .id_salt(&d.name)
-            .default_open(false)
-            .show(ui, |ui| {
-                for f in &d.functions {
-                    ui.monospace(f.display_name());
-                }
-            });
-    }
+    egui::ScrollArea::vertical()
+        .id_salt("imports_pane")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            for d in &doc.imports {
+                egui::CollapsingHeader::new(format!("{} ({})", d.name, d.functions.len()))
+                    .id_salt(&d.name)
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for f in &d.functions {
+                            ui.monospace(f.display_name());
+                        }
+                    });
+            }
+        });
 }
 
 fn show_exports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
@@ -1542,19 +1608,56 @@ fn render_resource_dir(ui: &mut egui::Ui, dir: &pe_edit::domain::ResourceDirecto
     }
 }
 
+/// Human-readable name for a relocation entry's `IMAGE_REL_BASED_*` type.
+fn reloc_type_name(t: u8) -> String {
+    let name = match t {
+        pe_edit::domain::relocation::IMAGE_REL_BASED_ABSOLUTE => "ABSOLUTE",
+        pe_edit::domain::relocation::IMAGE_REL_BASED_HIGH => "HIGH",
+        pe_edit::domain::relocation::IMAGE_REL_BASED_LOW => "LOW",
+        pe_edit::domain::relocation::IMAGE_REL_BASED_HIGHLOW => "HIGHLOW",
+        pe_edit::domain::relocation::IMAGE_REL_BASED_HIGHADJ => "HIGHADJ",
+        pe_edit::domain::relocation::IMAGE_REL_BASED_MIPS_JMPADDR => "MIPS_JMPADDR",
+        pe_edit::domain::relocation::IMAGE_REL_BASED_DIR64 => "DIR64",
+        other => return format!("TYPE_{other}"),
+    };
+    format!("{t} {name}")
+}
+
 fn show_relocations(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     let Some(t) = &doc.relocations else {
         ui.label(t!("empty.no_relocations"));
         return;
     };
-    for (i, b) in t.blocks.iter().enumerate() {
-        ui.label(t!(
-            "reloc.block",
-            i = i,
-            page = format!("{:#x}", b.page_rva.get()),
-            count = b.entries.len(),
-        ));
-    }
+    let entries: usize = t.blocks.iter().map(|b| b.entries.len()).sum();
+    ui.label(t!(
+        "reloc.summary",
+        blocks = t.blocks.len(),
+        entries = entries,
+    ));
+    egui::ScrollArea::vertical()
+        .id_salt("relocations")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            egui::Grid::new("reloc_table")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(t!("reloc.col_block"));
+                    ui.label(t!("reloc.col_page"));
+                    ui.label(t!("reloc.col_offset"));
+                    ui.label(t!("reloc.col_type"));
+                    ui.end_row();
+                    for (i, b) in t.blocks.iter().enumerate() {
+                        for e in &b.entries {
+                            ui.label(format!("{i}"));
+                            ui.monospace(format!("{:#x}", b.page_rva.get()));
+                            ui.monospace(format!("{:#x}", e.offset));
+                            ui.monospace(reloc_type_name(e.reloc_type));
+                            ui.end_row();
+                        }
+                    }
+                });
+        });
 }
 
 fn show_tls(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {

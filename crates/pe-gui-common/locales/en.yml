@@ -169,7 +169,11 @@ binary:
   jump_end: "Jump to section end"
 
 reloc:
-  block: "block %{i}: page %{page}, %{count} entries"
+  summary: "%{blocks} blocks · %{entries} entries"
+  col_block: "Block"
+  col_page: "Page RVA"
+  col_offset: "Offset"
+  col_type: "Type"
 
 status:
   loaded: "loaded %{path}"

@@ -169,7 +169,11 @@ binary:
   jump_end: "跳转到区段结束"
 
 reloc:
-  block: "块 %{i}: 页 %{page},%{count} 个条目"
+  summary: "%{blocks} 个块 · %{entries} 个条目"
+  col_block: "块"
+  col_page: "页 RVA"
+  col_offset: "偏移"
+  col_type: "类型"
 
 status:
   loaded: "已加载 %{path}"
