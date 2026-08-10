@@ -118,8 +118,8 @@ fn parse_hex64(s: &str) -> Option<u64> {
 }
 
 /// The left-hand PE-structure tree node selected, shown in the central panel
-/// (CFF-Explorer-style layout). Sections are browsed in the left pane's
-/// section table / binary view, not as tree nodes.
+/// (CFF-Explorer-style layout). Selecting "Sections" makes the right side a
+/// top/bottom split: the section table over a binary viewport preview.
 #[derive(Default, Clone, Copy, PartialEq)]
 enum PeNode {
     /// The Scylla workflow (dump → IAT → fix).
@@ -129,6 +129,7 @@ enum PeNode {
     Coff,
     Optional,
     DataDirs,
+    Sections,
     Imports,
     Exports,
     Resources,
@@ -660,15 +661,9 @@ impl eframe::App for ScyllaGui {
             });
         });
 
-        // CFF-Explorer-style layout: a left pane with the section table (top)
-        // and a virtualized binary view of the selected section (bottom), a
-        // PE-structure tree, and the selected node's content on the right.
-        egui::Panel::left("sections_pane")
-            .resizable(true)
-            .default_size(380.0)
-            .show(ui, |ui| {
-                self.show_sections_pane(ui);
-            });
+        // CFF-Explorer-style layout: a left menu tree; the selected node's
+        // content on the right. Selecting "Sections" turns the right side into
+        // a section table (top) + binary viewport preview (bottom).
         egui::Panel::left("tree_pane")
             .resizable(true)
             .default_size(200.0)
@@ -1175,6 +1170,7 @@ impl ScyllaGui {
         node(ui, "COFF Header", PeNode::Coff);
         node(ui, "Optional Header", PeNode::Optional);
         node(ui, "Data Directories", PeNode::DataDirs);
+        node(ui, "Sections", PeNode::Sections);
         node(ui, "Import Table", PeNode::Imports);
         node(ui, "Export Table", PeNode::Exports);
         node(ui, "Resources", PeNode::Resources);
@@ -1198,11 +1194,13 @@ impl ScyllaGui {
         };
         match self.selected {
             PeNode::Scylla => self.show_workflow(ui),
+            PeNode::Sections => self.show_sections_pane(ui),
             node => show_pe_node(ui, doc, node),
         }
     }
 
-    /// The left pane: section table (top) + virtualized binary view (bottom).
+    /// The right-side content when "Sections" is selected: the section table
+    /// (top) over a virtualized binary viewport preview (bottom).
     fn show_sections_pane(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("sec_table_pane")
             .resizable(true)
@@ -1215,7 +1213,7 @@ impl ScyllaGui {
         });
     }
 
-    /// The section table (selectable rows) in the left pane's top half.
+    /// The section table (selectable rows) in the top half of the Sections page.
     fn show_section_list(&mut self, ui: &mut egui::Ui) {
         ui.strong("Sections");
         let Some(doc) = self.doc.as_ref() else {
@@ -1247,10 +1245,11 @@ impl ScyllaGui {
             });
     }
 
-    /// The binary view of the selected section in the left pane's bottom half.
-    /// Virtualized (`show_rows`): only the rows in the visible window are
-    /// rendered, so even multi-megabyte sections stay responsive. Right-click
-    /// opens a menu to jump to an offset/address or the section start/end.
+    /// The binary view of the selected section in the bottom half of the
+    /// Sections page. Virtualized (`show_rows`): only the rows in the visible
+    /// window are rendered, so even multi-megabyte sections stay responsive.
+    /// Right-click opens a menu to jump to an offset/address or the section
+    /// start/end.
     fn show_binary(&mut self, ui: &mut egui::Ui) {
         let ScyllaGui {
             doc,
@@ -1370,7 +1369,8 @@ fn show_pe_node(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument, node: PeNo
         PeNode::Relocations => show_relocations(ui, doc),
         PeNode::Tls => show_tls(ui, doc),
         PeNode::LoadConfig => show_load_config(ui, doc),
-        PeNode::Scylla => {}
+        // Handled in ScyllaGui::show_selected.
+        PeNode::Scylla | PeNode::Sections => {}
     }
 }
 
