@@ -118,7 +118,8 @@ fn parse_hex64(s: &str) -> Option<u64> {
 }
 
 /// The left-hand PE-structure tree node selected, shown in the central panel
-/// (CFF-Explorer-style layout).
+/// (CFF-Explorer-style layout). Sections are browsed in the left pane's
+/// section table / binary view, not as tree nodes.
 #[derive(Default, Clone, Copy, PartialEq)]
 enum PeNode {
     /// The Scylla workflow (dump → IAT → fix).
@@ -128,8 +129,6 @@ enum PeNode {
     Coff,
     Optional,
     DataDirs,
-    Sections,
-    Section(usize),
     Imports,
     Exports,
     Resources,
@@ -183,6 +182,13 @@ struct ScyllaGui {
     disasm_section: usize,
     /// Selected left-hand PE-structure tree node.
     selected: PeNode,
+    /// The section selected in the left pane's section table, whose bytes are
+    /// shown in the binary view.
+    selected_section: usize,
+    /// "Jump to offset/address" input in the binary view's context menu.
+    binary_jump: String,
+    /// One-shot "scroll the binary view to this RVA" request.
+    binary_scroll_to: Option<u32>,
     /// Pending async tree save/load dialog results.
     tree_save_rx: Option<mpsc::Receiver<PickResult>>,
     tree_load_rx: Option<mpsc::Receiver<PickResult>>,
@@ -654,11 +660,18 @@ impl eframe::App for ScyllaGui {
             });
         });
 
-        // CFF-Explorer-style layout: a left PE-structure tree, the selected
-        // node's content on the right.
-        egui::Panel::left("pe_structure")
+        // CFF-Explorer-style layout: a left pane with the section table (top)
+        // and a virtualized binary view of the selected section (bottom), a
+        // PE-structure tree, and the selected node's content on the right.
+        egui::Panel::left("sections_pane")
             .resizable(true)
-            .default_size(230.0)
+            .default_size(380.0)
+            .show(ui, |ui| {
+                self.show_sections_pane(ui);
+            });
+        egui::Panel::left("tree_pane")
+            .resizable(true)
+            .default_size(200.0)
             .show(ui, |ui| {
                 self.show_structure_tree(ui);
             });
@@ -1158,23 +1171,10 @@ impl ScyllaGui {
         };
         node(ui, "Scylla (dump / IAT / fix)", PeNode::Scylla);
         ui.separator();
-        let Some(doc) = self.doc.as_ref() else {
-            self.selected = select;
-            return;
-        };
         node(ui, "DOS Header", PeNode::Dos);
         node(ui, "COFF Header", PeNode::Coff);
         node(ui, "Optional Header", PeNode::Optional);
         node(ui, "Data Directories", PeNode::DataDirs);
-        node(ui, "Section Table", PeNode::Sections);
-        egui::CollapsingHeader::new(format!("Sections ({})", doc.sections.len()))
-            .id_salt("sec_tree")
-            .default_open(false)
-            .show(ui, |ui| {
-                for (i, s) in doc.sections.iter().enumerate() {
-                    node(ui, &format!("{} ({i})", s.name_str()), PeNode::Section(i));
-                }
-            });
         node(ui, "Import Table", PeNode::Imports);
         node(ui, "Export Table", PeNode::Exports);
         node(ui, "Resources", PeNode::Resources);
@@ -1201,6 +1201,160 @@ impl ScyllaGui {
             node => show_pe_node(ui, doc, node),
         }
     }
+
+    /// The left pane: section table (top) + virtualized binary view (bottom).
+    fn show_sections_pane(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("sec_table_pane")
+            .resizable(true)
+            .default_size(200.0)
+            .show(ui, |ui| {
+                self.show_section_list(ui);
+            });
+        egui::CentralPanel::default_margins().show(ui, |ui| {
+            self.show_binary(ui);
+        });
+    }
+
+    /// The section table (selectable rows) in the left pane's top half.
+    fn show_section_list(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Sections");
+        let Some(doc) = self.doc.as_ref() else {
+            ui.weak("dump a process to see sections");
+            return;
+        };
+        egui::ScrollArea::vertical()
+            .id_salt("sec_list")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for (i, s) in doc.sections.iter().enumerate() {
+                    let selected = self.selected_section == i;
+                    let clicked = ui
+                        .selectable_label(
+                            selected,
+                            format!(
+                                "{}  va {:#x}  size {:#x}",
+                                s.name_str(),
+                                s.header.virtual_address.get(),
+                                s.data.len()
+                            ),
+                        )
+                        .clicked();
+                    if clicked {
+                        self.selected_section = i;
+                        self.binary_scroll_to = Some(s.header.virtual_address.get());
+                    }
+                }
+            });
+    }
+
+    /// The binary view of the selected section in the left pane's bottom half.
+    /// Virtualized (`show_rows`): only the rows in the visible window are
+    /// rendered, so even multi-megabyte sections stay responsive. Right-click
+    /// opens a menu to jump to an offset/address or the section start/end.
+    fn show_binary(&mut self, ui: &mut egui::Ui) {
+        let ScyllaGui {
+            doc,
+            selected_section,
+            binary_scroll_to,
+            binary_jump,
+            ..
+        } = self;
+        let image_base = doc.as_ref().map(|d| d.optional.image_base()).unwrap_or(0);
+        let Some(s) = doc.as_ref().and_then(|d| d.sections.get(*selected_section)) else {
+            ui.weak("select a section");
+            return;
+        };
+        let base = s.header.virtual_address.get();
+        let len = s.data.len();
+        if len == 0 {
+            ui.label(format!("{} — empty", s.name_str()));
+            return;
+        }
+        let rows = len.div_ceil(16).max(1);
+        let row_height = 18.0;
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{} — rva {base:#x}..{:#x} — {len} bytes",
+                s.name_str(),
+                base + len as u32 - 1
+            ));
+            ui.weak("(right-click to jump)");
+        });
+
+        // One-shot scroll to a requested RVA.
+        let mut sa = egui::ScrollArea::vertical()
+            .id_salt("binary")
+            .auto_shrink(false);
+        if let Some(rva) = *binary_scroll_to {
+            let off = (rva.saturating_sub(base) / 16) as f32 * row_height;
+            sa = sa.vertical_scroll_offset(off);
+        }
+        let mut jump_requested = false;
+        let out = sa.show_rows(ui, row_height, rows, |ui, range| {
+            for row in range {
+                let start = row * 16;
+                let chunk = &s.data[start..(start + 16).min(len)];
+                let rva = base + (row as u32) * 16;
+                let hex: String = chunk.iter().map(|b| format!("{b:02X} ")).collect();
+                let ascii: String = chunk
+                    .iter()
+                    .map(|&b| {
+                        if b.is_ascii_graphic() || b == b' ' {
+                            b as char
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                ui.monospace(format!("{rva:#08x}: {hex:<48} {ascii}"));
+            }
+        });
+        let ctx = ui.interact(
+            out.inner_rect,
+            egui::Id::new("binary_ctx"),
+            egui::Sense::click(),
+        );
+        ctx.context_menu(|ui| {
+            ui.label("跳转偏移/RVA:");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(binary_jump).desired_width(120.0));
+                if ui.button("Go").clicked() {
+                    if let Some(v) = parse_hex64(binary_jump) {
+                        *binary_scroll_to = Some(parse_jump_target(v, image_base, base, len));
+                        jump_requested = true;
+                    }
+                    ui.close();
+                }
+            });
+            ui.separator();
+            if ui.button("跳转到区段开始").clicked() {
+                *binary_scroll_to = Some(base);
+                jump_requested = true;
+                ui.close();
+            }
+            if ui.button("跳转到区段结束").clicked() {
+                *binary_scroll_to = Some(base + len.saturating_sub(1) as u32);
+                jump_requested = true;
+                ui.close();
+            }
+        });
+        // Consume the one-shot jump unless a new one was requested this frame.
+        if !jump_requested {
+            *binary_scroll_to = None;
+        }
+    }
+}
+
+/// Interpret a "jump" input as an offset (RVA) or an absolute address (VA ≥
+/// image base), clamped to the section's range.
+fn parse_jump_target(v: u64, image_base: u64, sec_base: u32, sec_len: usize) -> u32 {
+    let rva = if v >= image_base {
+        (v - image_base) as u32
+    } else {
+        v as u32
+    };
+    let end = sec_base.saturating_add(sec_len as u32).saturating_sub(1);
+    rva.clamp(sec_base, end.max(sec_base))
 }
 
 /// Render a PE-structure node's content (read-only).
@@ -1210,8 +1364,6 @@ fn show_pe_node(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument, node: PeNo
         PeNode::Coff => show_coff(ui, doc),
         PeNode::Optional => show_optional(ui, doc),
         PeNode::DataDirs => show_data_dirs(ui, doc),
-        PeNode::Sections => show_section_table(ui, doc),
-        PeNode::Section(i) => show_section(ui, doc, i),
         PeNode::Imports => show_imports(ui, doc),
         PeNode::Exports => show_exports(ui, doc),
         PeNode::Resources => show_resources(ui, doc),
@@ -1304,68 +1456,6 @@ fn show_data_dirs(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
                 ui.end_row();
             }
         });
-}
-
-fn show_section_table(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
-    egui::Grid::new("sec_table")
-        .num_columns(6)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.label("Name");
-            ui.label("VA");
-            ui.label("VSize");
-            ui.label("RawSize");
-            ui.label("RawPtr");
-            ui.label("Chars");
-            ui.end_row();
-            for s in &doc.sections {
-                ui.label(s.name_str());
-                ui.monospace(format!("{:#x}", s.header.virtual_address.get()));
-                ui.monospace(format!("{:#x}", s.header.virtual_size));
-                ui.monospace(format!("{:#x}", s.header.size_of_raw_data));
-                ui.monospace(format!("{:#x}", s.header.pointer_to_raw_data.get()));
-                ui.monospace(format!("{:#x}", s.header.characteristics));
-                ui.end_row();
-            }
-        });
-}
-
-fn show_section(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument, i: usize) {
-    let Some(s) = doc.sections.get(i) else {
-        ui.label("no such section");
-        return;
-    };
-    ui.label(format!(
-        "{} — va {:#x} size {} — {} bytes",
-        s.name_str(),
-        s.header.virtual_address.get(),
-        s.data.len(),
-        s.data.len()
-    ));
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        let base = s.header.virtual_address.get();
-        for (off, chunk) in s.data.chunks(16).enumerate() {
-            let hex: String = chunk.iter().map(|b| format!("{b:02X} ")).collect();
-            let ascii: String = chunk
-                .iter()
-                .map(|&b| {
-                    if b.is_ascii_graphic() || b == b' ' {
-                        b as char
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
-            ui.horizontal(|ui| {
-                ui.monospace(format!(
-                    "{:#08x}: {:<48} {}",
-                    base + (off * 16) as u32,
-                    hex,
-                    ascii
-                ));
-            });
-        }
-    });
 }
 
 fn show_imports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
