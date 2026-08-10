@@ -21,7 +21,12 @@ crates/pe-scylla-cli  CLI B — `pe-scylla` (dump → scan → fix → save)
 crates/pe-scylla-gui  GUI B — Scylla-style tool (process picker → dump → IAT → fix → save)
 crates/sim-target     self-corrupting no_std target that validates pe-scylla end-to-end
 crates/std-target     std program reproducing the documented dump limitation
+crates/pe-gui-common  shared GUI utilities: i18n (rust-i18n locales + CJK fonts + persisted language)
 ```
+
+Both GUIs are bilingual (简体中文 / English): the `Language` menu switches at
+runtime, the choice is persisted, and the first run auto-detects the system
+language. Strings live in `pe-gui-common/locales/` (`en.yml` / `zh-CN.yml`).
 
 ## pe-scylla: dump → fix a process
 
