@@ -1,0 +1,86 @@
+app:
+  title: "PE Editor"
+
+menu:
+  file: "File"
+  open: "Open PE File…"
+  save: "Save"
+  save_as: "Save As…"
+  exit: "Exit"
+  language: "Language"
+  lang_en: "English"
+  lang_zh: "中文"
+
+toolbar:
+  file: "File:"
+  not_open: "(not open)"
+
+tab:
+  headers: "Headers"
+  sections: "Sections"
+  imports: "Imports"
+  exports: "Exports"
+  directories: "Directories"
+
+guidance:
+  open_pe: "Open a PE file (File → Open PE File…) to begin editing."
+
+dialog:
+  open_pe: "Open PE file"
+  save_pe: "Save PE file"
+
+headers:
+  imports: "Imports"
+  exports: "Exports"
+  modules: "%{count} modules"
+  symbols: "%{count} symbols"
+
+sections:
+  add_section: "Add section:"
+
+imports:
+  modules: "Modules"
+  add: "Add:"
+  hint_module: "module"
+  hint_func: "func"
+  select_module_left: "Select a module on the left"
+  module_funcs: "%{module} — %{count} functions"
+  add_fn: "Add fn:"
+  ordinal_fn: "#%{ordinal} (ordinal)"
+
+exports:
+  module: "Module:"
+  base: "Base:"
+  add: "Add:"
+  hint_name: "name (empty = ordinal-only)"
+
+empty:
+  no_imports: "no imports"
+  no_functions: "no functions"
+  no_export_table: "No export table — add a symbol below to create one."
+
+status:
+  loaded: "loaded %{path}"
+  parse_failed: "parse failed: %{err}"
+  read_failed: "read failed: %{err}"
+  no_document: "no document"
+  saved: "saved %{len} bytes to %{path}"
+  write_failed: "write failed: %{err}"
+  serialize_failed: "serialize failed: %{err}"
+  headers_applied: "headers applied"
+  added_section: "added section %{name}"
+  add_failed: "add failed: %{err}"
+  remove_failed: "remove failed: %{err}"
+  module_func_required: "module and function names required"
+  added_import: "added import %{module}!%{func}"
+  add_import_failed: "add import failed: %{err}"
+  remove_import_failed: "remove import failed: %{err}"
+  added_export: "added export ordinal %{ordinal}"
+  add_export_failed: "add export failed: %{err}"
+  remove_export_failed: "remove export failed: %{err}"
+
+button:
+  apply_headers: "Apply header edits"
+  remove: "Remove"
+  add: "Add"
+  add_export: "Add export"

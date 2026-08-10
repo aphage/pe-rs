@@ -1,0 +1,86 @@
+app:
+  title: "PE 编辑器"
+
+menu:
+  file: "文件"
+  open: "打开 PE 文件…"
+  save: "保存"
+  save_as: "另存为…"
+  exit: "退出"
+  language: "语言"
+  lang_en: "English"
+  lang_zh: "中文"
+
+toolbar:
+  file: "文件:"
+  not_open: "(未打开)"
+
+tab:
+  headers: "头部"
+  sections: "节区"
+  imports: "导入"
+  exports: "导出"
+  directories: "数据目录"
+
+guidance:
+  open_pe: "打开一个 PE 文件(文件 → 打开 PE 文件…)开始编辑。"
+
+dialog:
+  open_pe: "打开 PE 文件"
+  save_pe: "保存 PE 文件"
+
+headers:
+  imports: "导入"
+  exports: "导出"
+  modules: "%{count} 个模块"
+  symbols: "%{count} 个符号"
+
+sections:
+  add_section: "添加节区:"
+
+imports:
+  modules: "模块"
+  add: "添加:"
+  hint_module: "模块名"
+  hint_func: "函数名"
+  select_module_left: "在左边选择一个模块"
+  module_funcs: "%{module} — %{count} 个函数"
+  add_fn: "添加函数:"
+  ordinal_fn: "#%{ordinal} (序号)"
+
+exports:
+  module: "模块:"
+  base: "基址:"
+  add: "添加:"
+  hint_name: "名称(留空 = 仅序号)"
+
+empty:
+  no_imports: "没有导入"
+  no_functions: "没有函数"
+  no_export_table: "没有导出表——在下方添加一个符号来创建。"
+
+status:
+  loaded: "已加载 %{path}"
+  parse_failed: "解析失败: %{err}"
+  read_failed: "读取失败: %{err}"
+  no_document: "没有文档"
+  saved: "已保存 %{len} 字节到 %{path}"
+  write_failed: "写入失败: %{err}"
+  serialize_failed: "序列化失败: %{err}"
+  headers_applied: "已应用头修改"
+  added_section: "已添加节区 %{name}"
+  add_failed: "添加失败: %{err}"
+  remove_failed: "移除失败: %{err}"
+  module_func_required: "需要填写模块名和函数名"
+  added_import: "已添加导入 %{module}!%{func}"
+  add_import_failed: "添加导入失败: %{err}"
+  remove_import_failed: "移除导入失败: %{err}"
+  added_export: "已添加导出序号 %{ordinal}"
+  add_export_failed: "添加导出失败: %{err}"
+  remove_export_failed: "移除导出失败: %{err}"
+
+button:
+  apply_headers: "应用头修改"
+  remove: "移除"
+  add: "添加"
+  add_export: "添加导出"
