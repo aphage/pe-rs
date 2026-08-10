@@ -9,7 +9,10 @@
 //! imports from it (writing the OEP).
 
 use eframe::egui;
-use pe_edit::domain::{IatFixOptions, IatFixReport, IatScan, ScanMethod, ScanOptions};
+use pe_edit::domain::{
+    DataDirectoryIndex, IatFixOptions, IatFixReport, IatScan, ResourceEntryData, ResourceName,
+    ScanMethod, ScanOptions,
+};
 use pe_edit::io::pe::serialize;
 use pe_scylla::api::{
     IatScanner, ImportStatus, ImportsTree, fix_iat_from_tree, get_imports_regions,
@@ -114,6 +117,27 @@ fn parse_hex64(s: &str) -> Option<u64> {
     }
 }
 
+/// The left-hand PE-structure tree node selected, shown in the central panel
+/// (CFF-Explorer-style layout).
+#[derive(Default, Clone, Copy, PartialEq)]
+enum PeNode {
+    /// The Scylla workflow (dump → IAT → fix).
+    #[default]
+    Scylla,
+    Dos,
+    Coff,
+    Optional,
+    DataDirs,
+    Sections,
+    Section(usize),
+    Imports,
+    Exports,
+    Resources,
+    Relocations,
+    Tls,
+    LoadConfig,
+}
+
 #[derive(Default)]
 struct ScyllaGui {
     pid: String,
@@ -157,6 +181,8 @@ struct ScyllaGui {
     /// Disassembler view state.
     show_disasm: bool,
     disasm_section: usize,
+    /// Selected left-hand PE-structure tree node.
+    selected: PeNode,
     /// Pending async tree save/load dialog results.
     tree_save_rx: Option<mpsc::Receiver<PickResult>>,
     tree_load_rx: Option<mpsc::Receiver<PickResult>>,
@@ -628,14 +654,16 @@ impl eframe::App for ScyllaGui {
             });
         });
 
+        // CFF-Explorer-style layout: a left PE-structure tree, the selected
+        // node's content on the right.
+        egui::Panel::left("pe_structure")
+            .resizable(true)
+            .default_size(230.0)
+            .show(ui, |ui| {
+                self.show_structure_tree(ui);
+            });
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            if self.doc.is_none() {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Dump a process (File → 选择进程…) to begin.");
-                });
-                return;
-            }
-            self.show_workflow(ui);
+            self.show_selected(ui);
         });
 
         // Log panel: the last few actions.
@@ -1117,4 +1145,355 @@ fn show_tree(ui: &mut egui::Ui, tree: &ImportsTree, keep: &mut [bool]) {
                 });
             }
         });
+}
+
+impl ScyllaGui {
+    /// The left-hand PE-structure tree (CFF-Explorer style).
+    fn show_structure_tree(&mut self, ui: &mut egui::Ui) {
+        let mut select = self.selected;
+        let mut node = |ui: &mut egui::Ui, label: &str, n: PeNode| {
+            if ui.selectable_label(select == n, label).clicked() {
+                select = n;
+            }
+        };
+        node(ui, "Scylla (dump / IAT / fix)", PeNode::Scylla);
+        ui.separator();
+        let Some(doc) = self.doc.as_ref() else {
+            self.selected = select;
+            return;
+        };
+        node(ui, "DOS Header", PeNode::Dos);
+        node(ui, "COFF Header", PeNode::Coff);
+        node(ui, "Optional Header", PeNode::Optional);
+        node(ui, "Data Directories", PeNode::DataDirs);
+        node(ui, "Section Table", PeNode::Sections);
+        egui::CollapsingHeader::new(format!("Sections ({})", doc.sections.len()))
+            .id_salt("sec_tree")
+            .default_open(false)
+            .show(ui, |ui| {
+                for (i, s) in doc.sections.iter().enumerate() {
+                    node(ui, &format!("{} ({i})", s.name_str()), PeNode::Section(i));
+                }
+            });
+        node(ui, "Import Table", PeNode::Imports);
+        node(ui, "Export Table", PeNode::Exports);
+        node(ui, "Resources", PeNode::Resources);
+        node(ui, "Relocations", PeNode::Relocations);
+        node(ui, "TLS", PeNode::Tls);
+        node(ui, "Load Config", PeNode::LoadConfig);
+        self.selected = select;
+    }
+
+    /// Render the selected left-hand node in the central panel.
+    fn show_selected(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.doc.as_ref() else {
+            if self.selected == PeNode::Scylla {
+                self.show_workflow(ui);
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Dump a process (File → 选择进程…) to begin.");
+                });
+            }
+            return;
+        };
+        match self.selected {
+            PeNode::Scylla => self.show_workflow(ui),
+            node => show_pe_node(ui, doc, node),
+        }
+    }
+}
+
+/// Render a PE-structure node's content (read-only).
+fn show_pe_node(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument, node: PeNode) {
+    match node {
+        PeNode::Dos => show_dos(ui, doc),
+        PeNode::Coff => show_coff(ui, doc),
+        PeNode::Optional => show_optional(ui, doc),
+        PeNode::DataDirs => show_data_dirs(ui, doc),
+        PeNode::Sections => show_section_table(ui, doc),
+        PeNode::Section(i) => show_section(ui, doc, i),
+        PeNode::Imports => show_imports(ui, doc),
+        PeNode::Exports => show_exports(ui, doc),
+        PeNode::Resources => show_resources(ui, doc),
+        PeNode::Relocations => show_relocations(ui, doc),
+        PeNode::Tls => show_tls(ui, doc),
+        PeNode::LoadConfig => show_load_config(ui, doc),
+        PeNode::Scylla => {}
+    }
+}
+
+/// A `(name, value)` field grid.
+fn grid(ui: &mut egui::Ui, rows: &[(&str, String)]) {
+    egui::Grid::new("field_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for (k, v) in rows {
+                ui.label(*k);
+                ui.monospace(v);
+                ui.end_row();
+            }
+        });
+}
+
+fn show_dos(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let d = &doc.dos;
+    grid(
+        ui,
+        &[
+            ("e_magic", format!("0x{:x}", d.e_magic)),
+            ("e_lfanew", format!("0x{:x}", d.e_lfanew)),
+            ("stub len", format!("{}", d.stub.len())),
+        ],
+    );
+}
+
+fn show_coff(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let c = &doc.coff;
+    grid(
+        ui,
+        &[
+            ("machine", format!("{:?}", c.machine)),
+            ("sections", format!("{}", c.number_of_sections)),
+            ("time/date", format!("0x{:x}", c.time_date_stamp)),
+            ("opt header", format!("{}", c.size_of_optional_header)),
+            ("characteristics", format!("0x{:x}", c.characteristics)),
+        ],
+    );
+}
+
+fn show_optional(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let o = &doc.optional;
+    grid(
+        ui,
+        &[
+            ("arch", format!("{:?}", o.arch())),
+            ("image base", format!("{:#x}", o.image_base())),
+            (
+                "entry point",
+                format!("{:#x}", o.address_of_entry_point().get()),
+            ),
+            ("section align", format!("0x{:x}", o.section_alignment())),
+            ("file align", format!("0x{:x}", o.file_alignment())),
+            ("size of image", format!("0x{:x}", o.size_of_image())),
+            ("size of headers", format!("0x{:x}", o.size_of_headers())),
+            ("checksum", format!("0x{:x}", o.checksum())),
+            ("subsystem", format!("{}", o.subsystem())),
+            ("dll chars", format!("0x{:x}", o.dll_characteristics())),
+        ],
+    );
+}
+
+fn show_data_dirs(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    egui::Grid::new("data_dirs")
+        .num_columns(3)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Directory");
+            ui.label("RVA");
+            ui.label("Size");
+            ui.end_row();
+            for i in 0..DataDirectoryIndex::COUNT {
+                let name = DataDirectoryIndex::from_usize(i)
+                    .map(|d| d.name().to_string())
+                    .unwrap_or_default();
+                let dd = doc.data_directories.get(i).copied().unwrap_or_default();
+                ui.label(name);
+                ui.monospace(format!("{:#x}", dd.rva.get()));
+                ui.monospace(format!("{:#x}", dd.size));
+                ui.end_row();
+            }
+        });
+}
+
+fn show_section_table(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    egui::Grid::new("sec_table")
+        .num_columns(6)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Name");
+            ui.label("VA");
+            ui.label("VSize");
+            ui.label("RawSize");
+            ui.label("RawPtr");
+            ui.label("Chars");
+            ui.end_row();
+            for s in &doc.sections {
+                ui.label(s.name_str());
+                ui.monospace(format!("{:#x}", s.header.virtual_address.get()));
+                ui.monospace(format!("{:#x}", s.header.virtual_size));
+                ui.monospace(format!("{:#x}", s.header.size_of_raw_data));
+                ui.monospace(format!("{:#x}", s.header.pointer_to_raw_data.get()));
+                ui.monospace(format!("{:#x}", s.header.characteristics));
+                ui.end_row();
+            }
+        });
+}
+
+fn show_section(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument, i: usize) {
+    let Some(s) = doc.sections.get(i) else {
+        ui.label("no such section");
+        return;
+    };
+    ui.label(format!(
+        "{} — va {:#x} size {} — {} bytes",
+        s.name_str(),
+        s.header.virtual_address.get(),
+        s.data.len(),
+        s.data.len()
+    ));
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let base = s.header.virtual_address.get();
+        for (off, chunk) in s.data.chunks(16).enumerate() {
+            let hex: String = chunk.iter().map(|b| format!("{b:02X} ")).collect();
+            let ascii: String = chunk
+                .iter()
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            ui.horizontal(|ui| {
+                ui.monospace(format!(
+                    "{:#08x}: {:<48} {}",
+                    base + (off * 16) as u32,
+                    hex,
+                    ascii
+                ));
+            });
+        }
+    });
+}
+
+fn show_imports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    if doc.imports.is_empty() {
+        ui.label("no imports");
+        return;
+    }
+    for d in &doc.imports {
+        egui::CollapsingHeader::new(format!("{} ({})", d.name, d.functions.len()))
+            .id_salt(&d.name)
+            .default_open(false)
+            .show(ui, |ui| {
+                for f in &d.functions {
+                    ui.monospace(f.display_name());
+                }
+            });
+    }
+}
+
+fn show_exports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let Some(e) = &doc.exports else {
+        ui.label("no export table");
+        return;
+    };
+    egui::Grid::new("exports")
+        .num_columns(4)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Ordinal");
+            ui.label("Name");
+            ui.label("RVA");
+            ui.label("Forwarder");
+            ui.end_row();
+            for s in &e.symbols {
+                ui.label(format!("{}", s.ordinal));
+                ui.monospace(s.name.as_deref().unwrap_or("<ordinal>"));
+                ui.monospace(format!("{:#x}", s.rva.get()));
+                ui.monospace(s.forwarder.as_deref().unwrap_or(""));
+                ui.end_row();
+            }
+        });
+}
+
+fn show_resources(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let Some(root) = &doc.resources else {
+        ui.label("no resources");
+        return;
+    };
+    render_resource_dir(ui, root);
+}
+
+fn render_resource_dir(ui: &mut egui::Ui, dir: &pe_edit::domain::ResourceDirectory) {
+    for e in &dir.entries {
+        let name = match &e.name {
+            ResourceName::Id(id) => format!("#{id}"),
+            ResourceName::Named(n) => n.clone(),
+        };
+        match &e.data {
+            ResourceEntryData::Directory(d) => {
+                egui::CollapsingHeader::new(name)
+                    .id_salt(format!("{:?}", e.name))
+                    .show(ui, |ui| {
+                        render_resource_dir(ui, d);
+                    });
+            }
+            ResourceEntryData::Leaf(l) => {
+                ui.horizontal(|ui| {
+                    ui.label(name);
+                    ui.monospace(format!("rva {:#x} size {:#x}", l.rva.get(), l.size));
+                });
+            }
+        }
+    }
+}
+
+fn show_relocations(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let Some(t) = &doc.relocations else {
+        ui.label("no relocations");
+        return;
+    };
+    for (i, b) in t.blocks.iter().enumerate() {
+        ui.label(format!(
+            "block {i}: page {:#x}, {} entries",
+            b.page_rva.get(),
+            b.entries.len()
+        ));
+    }
+}
+
+fn show_tls(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let Some(t) = &doc.tls else {
+        ui.label("no TLS");
+        return;
+    };
+    grid(
+        ui,
+        &[
+            ("start", format!("{:#x}", t.start_address_of_raw_data)),
+            ("end", format!("{:#x}", t.end_address_of_raw_data)),
+            ("index", format!("{:#x}", t.address_of_index)),
+            ("callbacks", format!("{:#x}", t.address_of_callbacks)),
+            ("zero fill", format!("{:#x}", t.size_of_zero_fill)),
+        ],
+    );
+}
+
+fn show_load_config(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
+    let Some(lc) = &doc.load_config else {
+        ui.label("no load config");
+        return;
+    };
+    grid(
+        ui,
+        &[
+            ("size", format!("{:#x}", lc.size)),
+            ("cookie", format!("{:#x}", lc.security_cookie)),
+            ("guard flags", format!("{:#x}", lc.guard_flags)),
+            (
+                "cf table",
+                format!(
+                    "{:#x} ({} funcs)",
+                    lc.guard_cf_function_table, lc.guard_cf_function_count
+                ),
+            ),
+            (
+                "xfg check",
+                format!("{:#x}", lc.guard_xfg_check_function_pointer),
+            ),
+        ],
+    );
 }
