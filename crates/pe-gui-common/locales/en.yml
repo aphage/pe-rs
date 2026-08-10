@@ -1,5 +1,6 @@
 app:
   title: "PE Editor"
+  title_scylla: "Scylla Dumper"
 
 menu:
   file: "File"
@@ -7,6 +8,13 @@ menu:
   save: "Save"
   save_as: "Save As…"
   exit: "Exit"
+  open_process: "Open Process…"
+  imports: "Imports"
+  save_tree: "Save Tree…"
+  load_tree: "Load Tree…"
+  view: "View"
+  disassembler: "Disassembler"
+  options: "Options…"
   language: "Language"
   lang_en: "English"
   lang_zh: "中文"
@@ -14,6 +22,11 @@ menu:
 toolbar:
   file: "File:"
   not_open: "(not open)"
+  process: "Process:"
+  pid_doc: "pid %{pid} · %{label}"
+
+log:
+  title: "Log"
 
 tab:
   headers: "Headers"
@@ -24,10 +37,45 @@ tab:
 
 guidance:
   open_pe: "Open a PE file (File → Open PE File…) to begin editing."
+  dump_process: "Dump a process (File → Open Process…) to begin."
 
 dialog:
   open_pe: "Open PE file"
   save_pe: "Save PE file"
+  save_tree: "Save import tree"
+  load_tree: "Load import tree"
+
+window:
+  pick_process: "Pick Process"
+  options: "Options"
+  disasm: "Disassembler"
+  confirm_save: "Confirm save"
+
+pick:
+  filter: "Filter:"
+  refresh: "Refresh"
+  processes: "Processes"
+  no_processes: "no processes"
+  modules: "Modules"
+  modules_pid: "Modules (pid %{pid})"
+  select_module: "Pick Module"
+  prompt_select_left: "Select a process on the left"
+  no_modules: "no modules"
+
+options:
+  suspend: "Suspend process for dumping"
+  advanced_search: "Advanced IAT search"
+  scan_direct_imports: "Scan direct imports"
+
+disasm:
+  section: "Section:"
+
+save:
+  broken_intro: "The import table may be broken; the saved file may not run:"
+  force_save: "Save Anyway"
+  warn_unresolved: "The last fix left %{count} imports unresolved; calls depending on them will break."
+  warn_unfixed: "This file came from a process dump and its import table was never fixed; the saved dump usually won't run."
+  warn_empty: "The import table is empty; the file may not run."
 
 headers:
   imports: "Imports"
@@ -37,6 +85,8 @@ headers:
 
 sections:
   add_section: "Add section:"
+  title: "Sections"
+  hint_dump: "dump a process to see sections"
 
 imports:
   modules: "Modules"
@@ -58,6 +108,68 @@ empty:
   no_imports: "no imports"
   no_functions: "no functions"
   no_export_table: "No export table — add a symbol below to create one."
+  no_exports: "no export table"
+  no_relocations: "no relocations"
+  no_resources: "no resources"
+  no_tls: "no TLS"
+  no_load_config: "no load config"
+  no_document: "no document"
+
+scan:
+  resolver: "Resolver"
+  code_ref: "Code references"
+  reflection: "Reflection"
+
+summary:
+  line: "%{arch} · base %{base} · entry %{entry} · %{sections} sections · %{imports} imports"
+
+workflow:
+  oep_hover: "Original entry point (RVA) written by Fix Dump"
+  no_regions: "(no regions — Scan IAT / IAT Auto or add below)"
+  add: "Add:"
+  add_region: "Add region"
+  method: "Method:"
+  scan_iat: "Scan IAT"
+  scan_iat_hover: "Scan the dumped image to find the IAT; fills the IAT region"
+  iat_auto: "IAT Auto"
+  iat_auto_hover: "Autosearch the IAT in the live process (from the OEP); fills the IAT region"
+  get_imports: "Get Imports"
+  get_imports_hover: "Resolve the live process's IAT into the import tree"
+  fix_dump: "Fix Dump"
+  fix_dump_hover: "Rebuild the imports in the dumped image from the tree"
+  guide_found: "IAT found — keep the scan region (or add more) and click Get Imports."
+  guide_none: "Dump a process, find the IAT (Scan IAT / IAT Auto or add regions), then Get Imports."
+
+tree:
+  header: "%{total} imports — %{valid} valid, %{suspect} suspect, %{invalid} invalid (uncheck to drop)"
+  module_header: "%{name}  (%{entries} entries, %{kept} kept)  first_thunk %{thunk}"
+
+node:
+  scylla: "Scylla (dump / IAT / fix)"
+  dos: "DOS Header"
+  coff: "COFF Header"
+  optional: "Optional Header"
+  data_dirs: "Data Directories"
+  sections: "Sections"
+  imports: "Import Table"
+  exports: "Export Table"
+  resources: "Resources"
+  relocations: "Relocations"
+  tls: "TLS"
+  load_config: "Load Config"
+
+binary:
+  select_section: "select a section"
+  empty: "%{name} — empty"
+  range: "%{name} — rva %{base}..%{end} — %{len} bytes"
+  jump_hint: "(right-click to jump)"
+  jump_label: "Jump to offset/RVA:"
+  go: "Go"
+  jump_start: "Jump to section start"
+  jump_end: "Jump to section end"
+
+reloc:
+  block: "block %{i}: page %{page}, %{count} entries"
 
 status:
   loaded: "loaded %{path}"
@@ -78,9 +190,32 @@ status:
   added_export: "added export ordinal %{ordinal}"
   add_export_failed: "add export failed: %{err}"
   remove_export_failed: "remove export failed: %{err}"
+  dumped: "dumped %{label} (pid %{pid})"
+  dump_failed: "dump failed: %{err}"
+  no_resolver: "no process resolver — dump a process first"
+  scan_ok: "scan (%{method}) — IAT at %{rva}, %{count} entries"
+  scan_failed: "scan (%{method}) failed: %{err}"
+  no_process: "no process — dump a process first"
+  no_iat_region: "add at least one IAT region (or Scan IAT / IAT Auto)"
+  get_imports_ok: "get imports — %{total} imports (%{valid} valid, %{suspect} suspect, %{invalid} invalid)"
+  get_imports_failed: "get imports failed: %{err}"
+  no_tree: "no import tree — Get Imports first"
+  fix_ok: "fixed %{built} imports (%{unresolved} unresolved, new table at %{rva})"
+  fix_failed: "fix failed: %{err}"
+  iat_auto_ok: "IAT autosearch — VA %{va} RVA %{rva} size %{size}"
+  iat_not_found: "IAT not found from %{start}"
+  iat_auto_failed: "IAT autosearch failed: %{err}"
+  no_tree_save: "no import tree to save"
+  tree_saved: "saved import tree to %{path}"
+  tree_save_failed: "save tree failed: %{err}"
+  tree_loaded: "loaded import tree from %{path}"
+  tree_load_failed: "load tree failed: %{err}"
+  added_iat_region: "added IAT region %{va}:%{size}"
+  region_needs_va_size: "region needs VA and size (hex)"
 
 button:
   apply_headers: "Apply header edits"
   remove: "Remove"
   add: "Add"
   add_export: "Add export"
+  close: "Close"

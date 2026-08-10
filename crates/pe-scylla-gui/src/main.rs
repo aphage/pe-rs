@@ -8,6 +8,10 @@
 //! ? suspect / ✗ invalid), the tree is curated, and **Fix Dump** rebuilds the
 //! imports from it (writing the OEP).
 
+// Locale resources are shared with pe-edit-gui via pe-gui-common; each GUI
+// declares its own `i18n!` so `t!` resolves to a backend in this crate.
+rust_i18n::i18n!("../pe-gui-common/locales");
+
 use eframe::egui;
 use pe_edit::domain::{
     DataDirectoryIndex, IatFixOptions, IatFixReport, IatScan, ResourceEntryData, ResourceName,
@@ -19,61 +23,39 @@ use pe_scylla::api::{
 };
 use pe_scylla::io::tree::{TreeFile, load_json, load_xml, save_json, save_xml};
 use pe_scylla::process::{self, ModuleInfo, ProcessInfo, ProcessResolver};
+use rust_i18n::t;
 use std::path::Path;
 use std::sync::mpsc;
 
 /// Result of an async file dialog (picked path, or `None` if cancelled).
 type PickResult = Option<std::path::PathBuf>;
 
-/// egui's bundled fonts have no CJK glyphs, so Chinese UI text renders as
-/// boxes. Install a Windows system CJK font as a fallback family.
-fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    for path in [
-        "C:/Windows/Fonts/msyh.ttc",   // Microsoft YaHei (collection)
-        "C:/Windows/Fonts/simhei.ttf", // SimHei
-        "C:/Windows/Fonts/Deng.ttf",   // DengXian
-    ] {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        fonts.font_data.insert(
-            "cjk".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .push("cjk".to_owned());
-        }
-        break;
-    }
-    ctx.set_fonts(fonts);
-}
-
 fn main() -> eframe::Result<()> {
+    // Choose the startup language (persisted choice, else system auto-detect)
+    // before the window is built so the initial title is already localized.
+    pe_gui_common::lang::init_lang();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 700.0])
+            .with_title(t!("app.title_scylla")),
         ..Default::default()
     };
     eframe::run_native(
         "pe-scylla",
         options,
         Box::new(|cc| {
-            install_fonts(&cc.egui_ctx);
+            pe_gui_common::fonts::install_fonts(&cc.egui_ctx);
             Ok(Box::new(ScyllaGui::default()))
         }),
     )
 }
 
 /// Human-readable label for a scan method (used in the IAT-page selector).
-fn scan_method_name(m: ScanMethod) -> &'static str {
+fn scan_method_name(m: ScanMethod) -> String {
     match m {
-        ScanMethod::Resolver => "Resolver",
-        ScanMethod::CodeReference => "Code references",
-        ScanMethod::Reflection => "Reflection",
+        ScanMethod::Resolver => t!("scan.resolver").into_owned(),
+        ScanMethod::CodeReference => t!("scan.code_ref").into_owned(),
+        ScanMethod::Reflection => t!("scan.reflection").into_owned(),
     }
 }
 
@@ -89,17 +71,19 @@ fn status_glyph(s: ImportStatus) -> &'static str {
 /// Read-only summary of the current document, for the toolbar.
 fn summary(doc: &pe_edit::domain::PeDocument) -> String {
     let imports: usize = doc.imports.iter().map(|d| d.functions.len()).sum();
-    format!(
-        "{} · base {:#x} · entry {:#x} · {} sections · {} imports",
-        match doc.arch {
-            pe_edit::domain::Arch::Bit64 => "x64",
-            pe_edit::domain::Arch::Bit32 => "x86",
-        },
-        doc.optional.image_base(),
-        doc.optional.address_of_entry_point().get(),
-        doc.sections.len(),
-        imports,
+    let arch = match doc.arch {
+        pe_edit::domain::Arch::Bit64 => "x64",
+        pe_edit::domain::Arch::Bit32 => "x86",
+    };
+    t!(
+        "summary.line",
+        arch = arch,
+        base = format!("{:#x}", doc.optional.image_base()),
+        entry = format!("{:#x}", doc.optional.address_of_entry_point().get()),
+        sections = doc.sections.len(),
+        imports = imports,
     )
+    .into_owned()
 }
 
 /// Parse a hex or decimal string into a `u64` (`None` when empty or invalid).
@@ -244,9 +228,9 @@ impl ScyllaGui {
                 if self.oep.is_empty() {
                     self.oep = format!("{entry:#x}");
                 }
-                self.status = format!("dumped {label} (pid {pid})");
+                self.status = t!("status.dumped", label = label, pid = pid).into_owned();
             }
-            Err(e) => self.status = format!("dump failed: {e}"),
+            Err(e) => self.status = t!("status.dump_failed", err = e.to_string()).into_owned(),
         }
     }
 
@@ -254,11 +238,11 @@ impl ScyllaGui {
     /// address/size fields with the result (Scylla's "find the IAT first").
     fn scan_iat(&mut self) {
         let Some(doc) = self.doc.as_ref() else {
-            self.status = "no document".into();
+            self.status = t!("status.no_document").into_owned();
             return;
         };
         let Some(resolver) = self.resolver.as_ref() else {
-            self.status = "no process resolver — dump a process first".into();
+            self.status = t!("status.no_resolver").into_owned();
             return;
         };
         let method = self.scan_method;
@@ -276,16 +260,22 @@ impl ScyllaGui {
                     base_va + scan.base_rva.get() as u64,
                     scan.entries.len() * psize,
                 ));
-                self.status = format!(
-                    "scan ({}) — IAT at {:#x}, {} entries",
-                    scan_method_name(method),
-                    scan.base_rva.get(),
-                    scan.entries.len()
-                );
+                self.status = t!(
+                    "status.scan_ok",
+                    method = scan_method_name(method),
+                    rva = format!("{:#x}", scan.base_rva.get()),
+                    count = scan.entries.len(),
+                )
+                .into_owned();
                 self.scan = Some(scan);
             }
             Err(e) => {
-                self.status = format!("scan ({}) failed: {e}", scan_method_name(method));
+                self.status = t!(
+                    "status.scan_failed",
+                    method = scan_method_name(method),
+                    err = e.to_string()
+                )
+                .into_owned();
                 self.scan = None;
             }
         }
@@ -296,11 +286,11 @@ impl ScyllaGui {
     /// several regions added by hand.
     fn get_imports(&mut self) {
         let (Some(resolver), Some(_doc)) = (self.resolver.as_ref(), self.doc.as_ref()) else {
-            self.status = "no process — dump a process first".into();
+            self.status = t!("status.no_process").into_owned();
             return;
         };
         if self.iat_regions.is_empty() {
-            self.status = "add at least one IAT region (or Scan IAT / IAT Auto)".into();
+            self.status = t!("status.no_iat_region").into_owned();
             return;
         }
         let pid = self.pid.parse::<u32>().unwrap_or(0);
@@ -314,17 +304,18 @@ impl ScyllaGui {
             Ok(tree) => {
                 let n = tree.total();
                 self.tree_keep = vec![true; n];
-                self.status = format!(
-                    "get imports — {} imports ({} valid, {} suspect, {} invalid)",
-                    tree.total(),
-                    tree.valid(),
-                    tree.suspect(),
-                    tree.invalid(),
-                );
+                self.status = t!(
+                    "status.get_imports_ok",
+                    total = tree.total(),
+                    valid = tree.valid(),
+                    suspect = tree.suspect(),
+                    invalid = tree.invalid(),
+                )
+                .into_owned();
                 self.tree = Some(tree);
             }
             Err(e) => {
-                self.status = format!("get imports failed: {e}");
+                self.status = t!("status.get_imports_failed", err = e.to_string()).into_owned();
                 self.tree = None;
                 self.tree_keep.clear();
             }
@@ -335,11 +326,11 @@ impl ScyllaGui {
     /// curated tree, writing the OEP field when set.
     fn fix_dump(&mut self) {
         let Some(tree) = self.tree.as_ref() else {
-            self.status = "no import tree — Get Imports first".into();
+            self.status = t!("status.no_tree").into_owned();
             return;
         };
         let Some(doc) = self.doc.as_mut() else {
-            self.status = "no document".into();
+            self.status = t!("status.no_document").into_owned();
             return;
         };
         // Apply the keep flags: unchecked entries are dropped (invalidated).
@@ -356,14 +347,15 @@ impl ScyllaGui {
         match fix_iat_from_tree(doc, &fixed, &IatFixOptions::default(), oep) {
             Ok(report) => {
                 self.last_fix = Some(report.clone());
-                self.status = format!(
-                    "fixed {} imports ({} unresolved, new table at {:#x})",
-                    report.imports_built,
-                    report.unresolved.len(),
-                    report.new_import_rva.map(|r| r.get()).unwrap_or(0),
+                self.status = t!(
+                    "status.fix_ok",
+                    built = report.imports_built,
+                    unresolved = report.unresolved.len(),
+                    rva = format!("{:#x}", report.new_import_rva.map(|r| r.get()).unwrap_or(0)),
                 )
+                .into_owned();
             }
-            Err(e) => self.status = format!("fix failed: {e}"),
+            Err(e) => self.status = t!("status.fix_failed", err = e.to_string()).into_owned(),
         }
     }
 
@@ -371,7 +363,7 @@ impl ScyllaGui {
     /// from the OEP (or the dumped entry point) and fill the IAT fields.
     fn iat_autosearch(&mut self) {
         let Some(resolver) = self.resolver.as_ref() else {
-            self.status = "no process — dump a process first".into();
+            self.status = t!("status.no_process").into_owned();
             return;
         };
         let pid = self.pid.parse::<u32>().unwrap_or(0);
@@ -387,13 +379,21 @@ impl ScyllaGui {
                 // Autosearch finds one region; replace the list with it.
                 self.iat_regions.clear();
                 self.iat_regions.push((va, size));
-                self.status = format!(
-                    "IAT autosearch — VA {va:#x} RVA {:#x} size {size}",
-                    va.saturating_sub(resolver.image_base)
-                );
+                self.status = t!(
+                    "status.iat_auto_ok",
+                    va = format!("{va:#x}"),
+                    rva = format!("{:#x}", va.saturating_sub(resolver.image_base)),
+                    size = size,
+                )
+                .into_owned();
             }
-            Ok(None) => self.status = format!("IAT not found from {start:#x}"),
-            Err(e) => self.status = format!("IAT autosearch failed: {e}"),
+            Ok(None) => {
+                self.status =
+                    t!("status.iat_not_found", start = format!("{start:#x}")).into_owned();
+            }
+            Err(e) => {
+                self.status = t!("status.iat_auto_failed", err = e.to_string()).into_owned();
+            }
         }
     }
 
@@ -412,18 +412,24 @@ impl ScyllaGui {
 
     fn write_file(&mut self, path: String) {
         let Some(doc) = self.doc.as_ref() else {
-            self.status = "no document".into();
+            self.status = t!("status.no_document").into_owned();
             return;
         };
         match serialize(doc) {
             Ok(bytes) => {
                 let len = bytes.len();
                 match std::fs::write(&path, bytes) {
-                    Ok(()) => self.status = format!("saved {len} bytes to {path}"),
-                    Err(e) => self.status = format!("write failed: {e}"),
+                    Ok(()) => {
+                        self.status = t!("status.saved", len = len, path = &path).into_owned()
+                    }
+                    Err(e) => {
+                        self.status = t!("status.write_failed", err = e.to_string()).into_owned();
+                    }
                 }
             }
-            Err(e) => self.status = format!("serialize failed: {e}"),
+            Err(e) => {
+                self.status = t!("status.serialize_failed", err = e.to_string()).into_owned();
+            }
         }
     }
 
@@ -445,18 +451,13 @@ impl ScyllaGui {
         if let Some(r) = &self.last_fix
             && !r.unresolved.is_empty()
         {
-            return Some(format!(
-                "上次修复有 {} 个导入未能解析,依赖它们的调用会失效。",
-                r.unresolved.len()
-            ));
+            return Some(t!("save.warn_unresolved", count = r.unresolved.len()).into_owned());
         }
         if self.last_fix.is_none() {
-            return Some(
-                "该文件来自进程 dump,导入表尚未修复,保存的 dump 通常无法直接运行。".into(),
-            );
+            return Some(t!("save.warn_unfixed").into_owned());
         }
         if doc.imports.is_empty() {
-            return Some("导入表为空,可能无法正常运行。".into());
+            return Some(t!("save.warn_empty").into_owned());
         }
         None
     }
@@ -467,7 +468,7 @@ impl ScyllaGui {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Save PE file")
+                .set_title(t!("dialog.save_pe"))
                 .add_filter("PE files", &["exe", "dll", "sys"])
                 .set_file_name("fixed.bin")
                 .save_file();
@@ -483,7 +484,7 @@ impl ScyllaGui {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Save import tree")
+                .set_title(t!("dialog.save_tree"))
                 .add_filter("XML", &["xml"])
                 .add_filter("JSON", &["json"])
                 .set_file_name("imports.xml")
@@ -500,7 +501,7 @@ impl ScyllaGui {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Load import tree")
+                .set_title(t!("dialog.load_tree"))
                 .add_filter("Import trees", &["xml", "json"])
                 .pick_file();
             let _ = tx.send(picked);
@@ -513,7 +514,7 @@ impl ScyllaGui {
     /// OEP / IAT metadata.
     fn save_tree(&mut self, path: String) {
         let Some(tree) = self.tree.as_ref() else {
-            self.log_line("no import tree to save".into());
+            self.log_line(t!("status.no_tree_save").into_owned());
             return;
         };
         let file = TreeFile {
@@ -529,8 +530,10 @@ impl ScyllaGui {
             save_xml(Path::new(&path), &file)
         };
         match res {
-            Ok(()) => self.log_line(format!("saved import tree to {path}")),
-            Err(e) => self.log_line(format!("save tree failed: {e}")),
+            Ok(()) => self.log_line(t!("status.tree_saved", path = &path).into_owned()),
+            Err(e) => {
+                self.log_line(t!("status.tree_save_failed", err = e.to_string()).into_owned())
+            }
         }
     }
 
@@ -553,9 +556,11 @@ impl ScyllaGui {
                 } else if file.iat_va != 0 {
                     self.iat_regions = vec![(file.iat_va, file.iat_size)];
                 }
-                self.log_line(format!("loaded import tree from {path}"));
+                self.log_line(t!("status.tree_loaded", path = &path).into_owned());
             }
-            Err(e) => self.log_line(format!("load tree failed: {e}")),
+            Err(e) => {
+                self.log_line(t!("status.tree_load_failed", err = e.to_string()).into_owned())
+            }
         }
     }
 
@@ -595,8 +600,8 @@ impl eframe::App for ScyllaGui {
         // Menu bar: the primary entry point for both workflows.
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("选择进程…").clicked() {
+                ui.menu_button(t!("menu.file"), |ui| {
+                    if ui.button(t!("menu.open_process")).clicked() {
                         self.processes = process::list_processes().unwrap_or_default();
                         self.modules.clear();
                         self.selected_module = None;
@@ -604,39 +609,40 @@ impl eframe::App for ScyllaGui {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Save").clicked() {
+                    if ui.button(t!("menu.save")).clicked() {
                         self.save(ui.ctx());
                         ui.close();
                     }
-                    if ui.button("Save As…").clicked() {
+                    if ui.button(t!("menu.save_as")).clicked() {
                         self.save_dialog(ui.ctx());
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Exit").clicked() {
+                    if ui.button(t!("menu.exit")).clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Imports", |ui| {
-                    if ui.button("Save Tree…").clicked() {
+                ui.menu_button(t!("menu.imports"), |ui| {
+                    if ui.button(t!("menu.save_tree")).clicked() {
                         self.save_tree_dialog(ui.ctx());
                         ui.close();
                     }
-                    if ui.button("Load Tree…").clicked() {
+                    if ui.button(t!("menu.load_tree")).clicked() {
                         self.load_tree_dialog(ui.ctx());
                         ui.close();
                     }
                 });
-                ui.menu_button("View", |ui| {
-                    if ui.button("Disassembler").clicked() {
+                ui.menu_button(t!("menu.view"), |ui| {
+                    if ui.button(t!("menu.disassembler")).clicked() {
                         self.show_disasm = true;
                         ui.close();
                     }
-                    if ui.button("Options…").clicked() {
+                    if ui.button(t!("menu.options")).clicked() {
                         self.show_options = true;
                         ui.close();
                     }
                 });
+                pe_gui_common::lang::lang_menu(ui, "app.title_scylla");
             });
         });
 
@@ -652,8 +658,12 @@ impl eframe::App for ScyllaGui {
         // image summary and the status.
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("进程:");
-                ui.label(format!("pid {} · {}", self.pid, self.dump_label));
+                ui.label(t!("toolbar.process"));
+                ui.label(t!(
+                    "toolbar.pid_doc",
+                    pid = &self.pid,
+                    label = &self.dump_label
+                ));
                 if let Some(doc) = &self.doc {
                     ui.separator();
                     ui.weak(summary(doc));
@@ -679,7 +689,7 @@ impl eframe::App for ScyllaGui {
         // Log panel: the last few actions.
         egui::Panel::bottom("log").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.strong("Log");
+                ui.strong(t!("log.title"));
                 ui.separator();
                 let start = self.log.len().saturating_sub(5);
                 for line in &self.log[start..] {
@@ -699,7 +709,7 @@ impl eframe::App for ScyllaGui {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("process_picker_viewport"),
                 egui::ViewportBuilder::default()
-                    .with_title("选择进程")
+                    .with_title(t!("window.pick_process"))
                     .with_inner_size([760.0, 480.0])
                     .with_resizable(true),
                 |ui, _class| {
@@ -711,15 +721,15 @@ impl eframe::App for ScyllaGui {
                     }
                     egui::CentralPanel::default().show(ui, |ui| {
                         // Title row (the window's X / ESC dismiss the picker).
-                        ui.strong("选择进程");
+                        ui.strong(t!("window.pick_process"));
                         ui.separator();
                         ui.horizontal(|ui| {
-                            ui.label("Filter:");
+                            ui.label(t!("pick.filter"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.process_filter)
                                     .desired_width(220.0),
                             );
-                            if ui.button("Refresh").clicked() {
+                            if ui.button(t!("pick.refresh")).clicked() {
                                 self.processes = process::list_processes().unwrap_or_default();
                             }
                         });
@@ -729,7 +739,7 @@ impl eframe::App for ScyllaGui {
                         ui.columns(2, |cols| {
                             // Left: process list.
                             cols[0].vertical(|ui| {
-                                ui.label("进程");
+                                ui.label(t!("pick.processes"));
                                 egui::ScrollArea::vertical()
                                     .id_salt("process_list")
                                     .auto_shrink(false)
@@ -759,7 +769,7 @@ impl eframe::App for ScyllaGui {
                                             }
                                         }
                                         if self.processes.is_empty() {
-                                            ui.weak("no processes");
+                                            ui.weak(t!("pick.no_processes"));
                                         }
                                         if let Some(pid) = pick_pid {
                                             self.pid = pid.to_string();
@@ -774,16 +784,19 @@ impl eframe::App for ScyllaGui {
                             cols[1].vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     if self.modules.is_empty() {
-                                        ui.label("模块");
+                                        ui.label(t!("pick.modules"));
                                     } else {
-                                        ui.label(format!("模块 (pid {})", self.pid));
+                                        ui.label(t!("pick.modules_pid", pid = &self.pid));
                                     }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             let enabled = self.selected_module.is_some();
                                             if ui
-                                                .add_enabled(enabled, egui::Button::new("选择模块"))
+                                                .add_enabled(
+                                                    enabled,
+                                                    egui::Button::new(t!("pick.select_module")),
+                                                )
                                                 .clicked()
                                             {
                                                 let module = self
@@ -803,7 +816,7 @@ impl eframe::App for ScyllaGui {
                                     );
                                 });
                                 if self.modules.is_empty() {
-                                    ui.weak("在左边选择一个进程");
+                                    ui.weak(t!("pick.prompt_select_left"));
                                 } else {
                                     let mut dump: Option<(u64, String)> = None;
                                     egui::ScrollArea::vertical()
@@ -826,7 +839,7 @@ impl eframe::App for ScyllaGui {
                                                 }
                                             }
                                             if self.modules.is_empty() {
-                                                ui.weak("no modules");
+                                                ui.weak(t!("pick.no_modules"));
                                             }
                                         });
                                     if let Some((base, name)) = dump {
@@ -855,7 +868,7 @@ impl eframe::App for ScyllaGui {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("options_viewport"),
                 egui::ViewportBuilder::default()
-                    .with_title("Options")
+                    .with_title(t!("window.options"))
                     .with_resizable(false),
                 |ui, _class| {
                     if ui.ctx().input(|i| i.viewport().close_requested())
@@ -864,11 +877,14 @@ impl eframe::App for ScyllaGui {
                         close_options = true;
                     }
                     egui::CentralPanel::default().show(ui, |ui| {
-                        ui.checkbox(&mut self.suspend_before_dump, "Suspend process for dumping");
-                        ui.checkbox(&mut self.advanced_search, "Advanced IAT search");
-                        ui.checkbox(&mut self.scan_direct_imports, "Scan direct imports");
+                        ui.checkbox(&mut self.suspend_before_dump, t!("options.suspend"));
+                        ui.checkbox(&mut self.advanced_search, t!("options.advanced_search"));
+                        ui.checkbox(
+                            &mut self.scan_direct_imports,
+                            t!("options.scan_direct_imports"),
+                        );
                         ui.separator();
-                        if ui.button("Close").clicked() {
+                        if ui.button(t!("button.close")).clicked() {
                             close_options = true;
                         }
                     });
@@ -886,7 +902,7 @@ impl eframe::App for ScyllaGui {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("disasm_viewport"),
                 egui::ViewportBuilder::default()
-                    .with_title("Disassembler")
+                    .with_title(t!("window.disasm"))
                     .with_inner_size([620.0, 480.0])
                     .with_resizable(true),
                 |ui, _class| {
@@ -898,7 +914,7 @@ impl eframe::App for ScyllaGui {
                     egui::CentralPanel::default().show(ui, |ui| {
                         if let Some(doc) = self.doc.as_ref() {
                             ui.horizontal(|ui| {
-                                ui.label("Section:");
+                                ui.label(t!("disasm.section"));
                                 egui::ComboBox::from_id_salt("disasm_sec")
                                     .selected_text(format!(
                                         "#{} {}",
@@ -930,9 +946,9 @@ impl eframe::App for ScyllaGui {
                                 });
                             }
                         } else {
-                            ui.label("no document");
+                            ui.label(t!("empty.no_document"));
                         }
-                        if ui.button("Close").clicked() {
+                        if ui.button(t!("button.close")).clicked() {
                             close_disasm = true;
                         }
                     });
@@ -951,7 +967,7 @@ impl eframe::App for ScyllaGui {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("confirm_save_viewport"),
                 egui::ViewportBuilder::default()
-                    .with_title("Confirm save")
+                    .with_title(t!("window.confirm_save"))
                     .with_resizable(false),
                 |ui, _class| {
                     if ui.ctx().input(|i| i.viewport().close_requested())
@@ -960,13 +976,13 @@ impl eframe::App for ScyllaGui {
                         close_save = true;
                     }
                     egui::CentralPanel::default().show(ui, |ui| {
-                        ui.label("导入表可能损坏,保存的文件可能无法正常运行:");
+                        ui.label(t!("save.broken_intro"));
                         if let Some(warn) = &self.save_warning {
                             ui.label(warn);
                         }
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("仍然保存").clicked() {
+                            if ui.button(t!("save.force_save")).clicked() {
                                 if let Some(path) = self.pending_save_path.take() {
                                     self.write_file(path);
                                 }
@@ -991,7 +1007,7 @@ impl ScyllaGui {
         ui.horizontal(|ui| {
             ui.label("OEP:");
             ui.add(egui::TextEdit::singleline(&mut self.oep).desired_width(90.0))
-                .on_hover_text("Original entry point (RVA) written by Fix Dump");
+                .on_hover_text(t!("workflow.oep_hover"));
         });
         // IAT regions: a normal IAT is one (VA, size); a sliced / scattered
         // IAT is several non-contiguous regions, added by hand.
@@ -1008,11 +1024,11 @@ impl ScyllaGui {
                 self.iat_regions.remove(i);
             }
             if self.iat_regions.is_empty() {
-                ui.weak("(no regions — Scan IAT / IAT Auto or add below)");
+                ui.weak(t!("workflow.no_regions"));
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Add:");
+            ui.label(t!("workflow.add"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.iat_region_va)
                     .hint_text("VA")
@@ -1023,7 +1039,7 @@ impl ScyllaGui {
                     .hint_text("size")
                     .desired_width(70.0),
             );
-            if ui.button("Add region").clicked() {
+            if ui.button(t!("workflow.add_region")).clicked() {
                 let va = parse_hex64(&self.iat_region_va);
                 let size = parse_hex64(&self.iat_region_size).map(|v| v as usize);
                 match (va, size) {
@@ -1031,53 +1047,59 @@ impl ScyllaGui {
                         self.iat_regions.push((va, size));
                         self.iat_region_va.clear();
                         self.iat_region_size.clear();
-                        self.status = format!("added IAT region {va:#x}:{size:#x}");
+                        self.status = t!(
+                            "status.added_iat_region",
+                            va = format!("{va:#x}"),
+                            size = format!("{size:#x}")
+                        )
+                        .into_owned();
                     }
-                    _ => self.status = "region needs VA and size (hex)".into(),
+                    _ => self.status = t!("status.region_needs_va_size").into_owned(),
                 }
             }
         });
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label("Method:");
+            ui.label(t!("workflow.method"));
             egui::ComboBox::from_id_salt("scan_method")
                 .selected_text(scan_method_name(self.scan_method))
                 .show_ui(ui, |ui| {
-                    for (m, name) in [
-                        (ScanMethod::Resolver, "Resolver"),
-                        (ScanMethod::CodeReference, "Code references"),
-                        (ScanMethod::Reflection, "Reflection"),
+                    for m in [
+                        ScanMethod::Resolver,
+                        ScanMethod::CodeReference,
+                        ScanMethod::Reflection,
                     ] {
-                        ui.selectable_value(&mut self.scan_method, m, name);
+                        ui.selectable_value(&mut self.scan_method, m, scan_method_name(m));
                     }
                 });
             if ui
-                .add_enabled(has_resolver, egui::Button::new("Scan IAT"))
-                .on_hover_text("Scan the dumped image to find the IAT; fills the IAT region")
+                .add_enabled(has_resolver, egui::Button::new(t!("workflow.scan_iat")))
+                .on_hover_text(t!("workflow.scan_iat_hover"))
                 .clicked()
             {
                 self.scan_iat();
             }
             if ui
-                .add_enabled(has_resolver, egui::Button::new("IAT Auto"))
-                .on_hover_text(
-                    "Autosearch the IAT in the live process (from the OEP); fills the IAT region",
-                )
+                .add_enabled(has_resolver, egui::Button::new(t!("workflow.iat_auto")))
+                .on_hover_text(t!("workflow.iat_auto_hover"))
                 .clicked()
             {
                 self.iat_autosearch();
             }
             if ui
-                .add_enabled(has_resolver, egui::Button::new("Get Imports"))
-                .on_hover_text("Resolve the live process's IAT into the import tree")
+                .add_enabled(has_resolver, egui::Button::new(t!("workflow.get_imports")))
+                .on_hover_text(t!("workflow.get_imports_hover"))
                 .clicked()
             {
                 self.get_imports();
             }
             if ui
-                .add_enabled(self.tree.is_some(), egui::Button::new("Fix Dump"))
-                .on_hover_text("Rebuild the imports in the dumped image from the tree")
+                .add_enabled(
+                    self.tree.is_some(),
+                    egui::Button::new(t!("workflow.fix_dump")),
+                )
+                .on_hover_text(t!("workflow.fix_dump_hover"))
                 .clicked()
             {
                 self.fix_dump();
@@ -1088,11 +1110,9 @@ impl ScyllaGui {
         match &self.tree {
             None => {
                 if self.scan.is_some() {
-                    ui.label(
-                        "IAT found — keep the scan region (or add more) and click Get Imports.",
-                    );
+                    ui.label(t!("workflow.guide_found"));
                 } else {
-                    ui.label("Dump a process, find the IAT (Scan IAT / IAT Auto or add regions), then Get Imports.");
+                    ui.label(t!("workflow.guide_none"));
                 }
             }
             Some(tree) => show_tree(ui, tree, &mut self.tree_keep),
@@ -1102,12 +1122,12 @@ impl ScyllaGui {
 
 /// Render the curated import tree (module → entries with keep flags).
 fn show_tree(ui: &mut egui::Ui, tree: &ImportsTree, keep: &mut [bool]) {
-    ui.label(format!(
-        "{} imports — {} valid, {} suspect, {} invalid (uncheck to drop)",
-        tree.total(),
-        tree.valid(),
-        tree.suspect(),
-        tree.invalid(),
+    ui.label(t!(
+        "tree.header",
+        total = tree.total(),
+        valid = tree.valid(),
+        suspect = tree.suspect(),
+        invalid = tree.invalid(),
     ));
     egui::ScrollArea::vertical()
         .id_salt("imports_tree")
@@ -1120,12 +1140,12 @@ fn show_tree(ui: &mut egui::Ui, tree: &ImportsTree, keep: &mut [bool]) {
                     .iter()
                     .filter(|e| e.status != ImportStatus::Invalid)
                     .count();
-                egui::CollapsingHeader::new(format!(
-                    "{}  ({} entries, {} kept)  first_thunk {:#x}",
-                    module.name,
-                    module.entries.len(),
-                    kept,
-                    module.first_thunk,
+                egui::CollapsingHeader::new(t!(
+                    "tree.module_header",
+                    name = &module.name,
+                    entries = module.entries.len(),
+                    kept = kept,
+                    thunk = format!("{:#x}", module.first_thunk),
                 ))
                 .id_salt((&module.name, module.first_thunk))
                 .default_open(true)
@@ -1153,19 +1173,19 @@ impl ScyllaGui {
                 select = n;
             }
         };
-        node(ui, "Scylla (dump / IAT / fix)", PeNode::Scylla);
+        node(ui, t!("node.scylla").as_ref(), PeNode::Scylla);
         ui.separator();
-        node(ui, "DOS Header", PeNode::Dos);
-        node(ui, "COFF Header", PeNode::Coff);
-        node(ui, "Optional Header", PeNode::Optional);
-        node(ui, "Data Directories", PeNode::DataDirs);
-        node(ui, "Sections", PeNode::Sections);
-        node(ui, "Import Table", PeNode::Imports);
-        node(ui, "Export Table", PeNode::Exports);
-        node(ui, "Resources", PeNode::Resources);
-        node(ui, "Relocations", PeNode::Relocations);
-        node(ui, "TLS", PeNode::Tls);
-        node(ui, "Load Config", PeNode::LoadConfig);
+        node(ui, t!("node.dos").as_ref(), PeNode::Dos);
+        node(ui, t!("node.coff").as_ref(), PeNode::Coff);
+        node(ui, t!("node.optional").as_ref(), PeNode::Optional);
+        node(ui, t!("node.data_dirs").as_ref(), PeNode::DataDirs);
+        node(ui, t!("node.sections").as_ref(), PeNode::Sections);
+        node(ui, t!("node.imports").as_ref(), PeNode::Imports);
+        node(ui, t!("node.exports").as_ref(), PeNode::Exports);
+        node(ui, t!("node.resources").as_ref(), PeNode::Resources);
+        node(ui, t!("node.relocations").as_ref(), PeNode::Relocations);
+        node(ui, t!("node.tls").as_ref(), PeNode::Tls);
+        node(ui, t!("node.load_config").as_ref(), PeNode::LoadConfig);
         self.selected = select;
     }
 
@@ -1176,7 +1196,7 @@ impl ScyllaGui {
                 self.show_workflow(ui);
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Dump a process (File → 选择进程…) to begin.");
+                    ui.label(t!("guidance.dump_process"));
                 });
             }
             return;
@@ -1204,9 +1224,9 @@ impl ScyllaGui {
 
     /// The section table (selectable rows) in the top half of the Sections page.
     fn show_section_list(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Sections");
+        ui.strong(t!("sections.title"));
         let Some(doc) = self.doc.as_ref() else {
-            ui.weak("dump a process to see sections");
+            ui.weak(t!("sections.hint_dump"));
             return;
         };
         egui::ScrollArea::vertical()
@@ -1249,24 +1269,26 @@ impl ScyllaGui {
         } = self;
         let image_base = doc.as_ref().map(|d| d.optional.image_base()).unwrap_or(0);
         let Some(s) = doc.as_ref().and_then(|d| d.sections.get(*selected_section)) else {
-            ui.weak("select a section");
+            ui.weak(t!("binary.select_section"));
             return;
         };
         let base = s.header.virtual_address.get();
         let len = s.data.len();
         if len == 0 {
-            ui.label(format!("{} — empty", s.name_str()));
+            ui.label(t!("binary.empty", name = &s.name_str()));
             return;
         }
         let rows = len.div_ceil(16).max(1);
         let row_height = 18.0;
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "{} — rva {base:#x}..{:#x} — {len} bytes",
-                s.name_str(),
-                base + len as u32 - 1
+            ui.label(t!(
+                "binary.range",
+                name = &s.name_str(),
+                base = format!("{base:#x}"),
+                end = format!("{:#x}", base + len as u32 - 1),
+                len = len,
             ));
-            ui.weak("(right-click to jump)");
+            ui.weak(t!("binary.jump_hint"));
         });
 
         // One-shot scroll to a requested RVA.
@@ -1303,10 +1325,10 @@ impl ScyllaGui {
             egui::Sense::click(),
         );
         ctx.context_menu(|ui| {
-            ui.label("跳转偏移/RVA:");
+            ui.label(t!("binary.jump_label"));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(binary_jump).desired_width(120.0));
-                if ui.button("Go").clicked() {
+                if ui.button(t!("binary.go")).clicked() {
                     if let Some(v) = parse_hex64(binary_jump) {
                         *binary_scroll_to = Some(parse_jump_target(v, image_base, base, len));
                         jump_requested = true;
@@ -1315,12 +1337,12 @@ impl ScyllaGui {
                 }
             });
             ui.separator();
-            if ui.button("跳转到区段开始").clicked() {
+            if ui.button(t!("binary.jump_start")).clicked() {
                 *binary_scroll_to = Some(base);
                 jump_requested = true;
                 ui.close();
             }
-            if ui.button("跳转到区段结束").clicked() {
+            if ui.button(t!("binary.jump_end")).clicked() {
                 *binary_scroll_to = Some(base + len.saturating_sub(1) as u32);
                 jump_requested = true;
                 ui.close();
@@ -1449,7 +1471,7 @@ fn show_data_dirs(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
 
 fn show_imports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     if doc.imports.is_empty() {
-        ui.label("no imports");
+        ui.label(t!("empty.no_imports"));
         return;
     }
     for d in &doc.imports {
@@ -1466,7 +1488,7 @@ fn show_imports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
 
 fn show_exports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     let Some(e) = &doc.exports else {
-        ui.label("no export table");
+        ui.label(t!("empty.no_exports"));
         return;
     };
     egui::Grid::new("exports")
@@ -1490,7 +1512,7 @@ fn show_exports(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
 
 fn show_resources(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     let Some(root) = &doc.resources else {
-        ui.label("no resources");
+        ui.label(t!("empty.no_resources"));
         return;
     };
     render_resource_dir(ui, root);
@@ -1522,21 +1544,22 @@ fn render_resource_dir(ui: &mut egui::Ui, dir: &pe_edit::domain::ResourceDirecto
 
 fn show_relocations(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     let Some(t) = &doc.relocations else {
-        ui.label("no relocations");
+        ui.label(t!("empty.no_relocations"));
         return;
     };
     for (i, b) in t.blocks.iter().enumerate() {
-        ui.label(format!(
-            "block {i}: page {:#x}, {} entries",
-            b.page_rva.get(),
-            b.entries.len()
+        ui.label(t!(
+            "reloc.block",
+            i = i,
+            page = format!("{:#x}", b.page_rva.get()),
+            count = b.entries.len(),
         ));
     }
 }
 
 fn show_tls(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     let Some(t) = &doc.tls else {
-        ui.label("no TLS");
+        ui.label(t!("empty.no_tls"));
         return;
     };
     grid(
@@ -1553,7 +1576,7 @@ fn show_tls(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
 
 fn show_load_config(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
     let Some(lc) = &doc.load_config else {
-        ui.label("no load config");
+        ui.label(t!("empty.no_load_config"));
         return;
     };
     grid(

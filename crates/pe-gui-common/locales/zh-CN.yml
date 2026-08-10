@@ -1,5 +1,6 @@
 app:
   title: "PE 编辑器"
+  title_scylla: "Scylla 转储器"
 
 menu:
   file: "文件"
@@ -7,6 +8,13 @@ menu:
   save: "保存"
   save_as: "另存为…"
   exit: "退出"
+  open_process: "选择进程…"
+  imports: "导入"
+  save_tree: "保存导入树…"
+  load_tree: "加载导入树…"
+  view: "视图"
+  disassembler: "反汇编器"
+  options: "选项…"
   language: "语言"
   lang_en: "English"
   lang_zh: "中文"
@@ -14,6 +22,11 @@ menu:
 toolbar:
   file: "文件:"
   not_open: "(未打开)"
+  process: "进程:"
+  pid_doc: "pid %{pid} · %{label}"
+
+log:
+  title: "日志"
 
 tab:
   headers: "头部"
@@ -24,10 +37,45 @@ tab:
 
 guidance:
   open_pe: "打开一个 PE 文件(文件 → 打开 PE 文件…)开始编辑。"
+  dump_process: "先转储一个进程(文件 → 选择进程…)。"
 
 dialog:
   open_pe: "打开 PE 文件"
   save_pe: "保存 PE 文件"
+  save_tree: "保存导入树"
+  load_tree: "加载导入树"
+
+window:
+  pick_process: "选择进程"
+  options: "选项"
+  disasm: "反汇编器"
+  confirm_save: "确认保存"
+
+pick:
+  filter: "筛选:"
+  refresh: "刷新"
+  processes: "进程"
+  no_processes: "没有进程"
+  modules: "模块"
+  modules_pid: "模块 (pid %{pid})"
+  select_module: "选择模块"
+  prompt_select_left: "在左边选择一个进程"
+  no_modules: "没有模块"
+
+options:
+  suspend: "转储前挂起进程"
+  advanced_search: "高级 IAT 搜索"
+  scan_direct_imports: "扫描直接导入"
+
+disasm:
+  section: "节区:"
+
+save:
+  broken_intro: "导入表可能损坏,保存的文件可能无法正常运行:"
+  force_save: "仍然保存"
+  warn_unresolved: "上次修复有 %{count} 个导入未能解析,依赖它们的调用会失效。"
+  warn_unfixed: "该文件来自进程 dump,导入表尚未修复,保存的 dump 通常无法直接运行。"
+  warn_empty: "导入表为空,可能无法正常运行。"
 
 headers:
   imports: "导入"
@@ -37,6 +85,8 @@ headers:
 
 sections:
   add_section: "添加节区:"
+  title: "节区"
+  hint_dump: "转储进程以查看节区"
 
 imports:
   modules: "模块"
@@ -58,6 +108,68 @@ empty:
   no_imports: "没有导入"
   no_functions: "没有函数"
   no_export_table: "没有导出表——在下方添加一个符号来创建。"
+  no_exports: "没有导出表"
+  no_relocations: "没有重定位"
+  no_resources: "没有资源"
+  no_tls: "没有 TLS"
+  no_load_config: "没有加载配置"
+  no_document: "没有文档"
+
+scan:
+  resolver: "解析器"
+  code_ref: "代码引用"
+  reflection: "反射"
+
+summary:
+  line: "%{arch} · base %{base} · entry %{entry} · %{sections} 个节区 · %{imports} 个导入"
+
+workflow:
+  oep_hover: "原始入口点(RVA),由 Fix Dump 写入"
+  no_regions: "(无区域——扫描 IAT / IAT 自动,或在下添加)"
+  add: "添加:"
+  add_region: "添加区域"
+  method: "方法:"
+  scan_iat: "扫描 IAT"
+  scan_iat_hover: "扫描转储镜像以定位 IAT;填充 IAT 区域"
+  iat_auto: "IAT 自动"
+  iat_auto_hover: "在活动进程中自动搜索 IAT(从 OEP 起);填充 IAT 区域"
+  get_imports: "获取导入"
+  get_imports_hover: "把活动进程的 IAT 解析为导入树"
+  fix_dump: "修复转储"
+  fix_dump_hover: "根据导入树重建转储镜像中的导入"
+  guide_found: "已找到 IAT——保留扫描区域(或再添加),然后点击“获取导入”。"
+  guide_none: "先转储进程,定位 IAT(扫描 IAT / IAT 自动,或手动添加区域),然后“获取导入”。"
+
+tree:
+  header: "%{total} 个导入 — %{valid} 有效, %{suspect} 可疑, %{invalid} 无效(取消勾选即丢弃)"
+  module_header: "%{name}  (%{entries} 个条目, %{kept} 保留)  first_thunk %{thunk}"
+
+node:
+  scylla: "Scylla (转储 / IAT / 修复)"
+  dos: "DOS 头"
+  coff: "COFF 头"
+  optional: "可选头"
+  data_dirs: "数据目录"
+  sections: "节区"
+  imports: "导入表"
+  exports: "导出表"
+  resources: "资源"
+  relocations: "重定位"
+  tls: "TLS"
+  load_config: "加载配置"
+
+binary:
+  select_section: "选择一个节区"
+  empty: "%{name} — 空"
+  range: "%{name} — rva %{base}..%{end} — %{len} 字节"
+  jump_hint: "(右键跳转)"
+  jump_label: "跳转偏移/RVA:"
+  go: "跳转"
+  jump_start: "跳转到区段开始"
+  jump_end: "跳转到区段结束"
+
+reloc:
+  block: "块 %{i}: 页 %{page},%{count} 个条目"
 
 status:
   loaded: "已加载 %{path}"
@@ -78,9 +190,32 @@ status:
   added_export: "已添加导出序号 %{ordinal}"
   add_export_failed: "添加导出失败: %{err}"
   remove_export_failed: "移除导出失败: %{err}"
+  dumped: "已转储 %{label}(pid %{pid})"
+  dump_failed: "转储失败: %{err}"
+  no_resolver: "没有进程解析器——请先转储一个进程"
+  scan_ok: "扫描(%{method})— IAT 位于 %{rva},%{count} 个条目"
+  scan_failed: "扫描(%{method})失败: %{err}"
+  no_process: "没有进程——请先转储一个进程"
+  no_iat_region: "至少添加一个 IAT 区域(或 Scan IAT / IAT Auto)"
+  get_imports_ok: "获取导入 — %{total} 个导入(%{valid} 有效, %{suspect} 可疑, %{invalid} 无效)"
+  get_imports_failed: "获取导入失败: %{err}"
+  no_tree: "没有导入树——请先 Get Imports"
+  fix_ok: "已修复 %{built} 个导入(%{unresolved} 个未解析,新表位于 %{rva})"
+  fix_failed: "修复失败: %{err}"
+  iat_auto_ok: "IAT 自动搜索 — VA %{va} RVA %{rva} 大小 %{size}"
+  iat_not_found: "未从 %{start} 找到 IAT"
+  iat_auto_failed: "IAT 自动搜索失败: %{err}"
+  no_tree_save: "没有可保存的导入树"
+  tree_saved: "已保存导入树到 %{path}"
+  tree_save_failed: "保存导入树失败: %{err}"
+  tree_loaded: "已从 %{path} 加载导入树"
+  tree_load_failed: "加载导入树失败: %{err}"
+  added_iat_region: "已添加 IAT 区域 %{va}:%{size}"
+  region_needs_va_size: "区域需要 VA 和大小(十六进制)"
 
 button:
   apply_headers: "应用头修改"
   remove: "移除"
   add: "添加"
   add_export: "添加导出"
+  close: "关闭"
