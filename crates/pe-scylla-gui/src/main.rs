@@ -1599,3 +1599,35 @@ fn show_load_config(ui: &mut egui::Ui, doc: &pe_edit::domain::PeDocument) {
         ],
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use rust_i18n::t;
+
+    /// Reproduce the app flow that shows the window-title bug: `init_lang`
+    /// at startup, then a runtime language switch re-resolving the title.
+    #[test]
+    fn startup_and_switch_resolve_title() {
+        // main(): init_lang sets the global locale, then main()'s with_title
+        // resolves via THIS crate's backend.
+        pe_gui_common::lang::init_lang();
+        let initial = t!("app.title_scylla").into_owned();
+
+        // The Language menu's set_lang re-resolves the title via
+        // pe-gui-common's backend after set_locale. Emulate both halves:
+        // set the locale exactly as set_lang does, then translate.
+        let current = &*rust_i18n::locale();
+        let code = if current == "en" { "zh-CN" } else { "en" };
+        rust_i18n::set_locale(code);
+        let switched = t!("app.title_scylla").into_owned();
+
+        eprintln!(
+            "locale={} initial={initial} switched={switched} (code={code})",
+            &*rust_i18n::locale()
+        );
+        assert!(initial.starts_with("Scylla") || initial.contains("Scylla"));
+        assert!(switched.starts_with("Scylla") || switched.contains("Scylla"));
+        assert_ne!(initial, switched, "titles should differ across languages");
+        rust_i18n::set_locale("en");
+    }
+}

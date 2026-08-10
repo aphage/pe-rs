@@ -23,6 +23,17 @@ rust_i18n::i18n!("locales");
 mod tests {
     use rust_i18n::t;
     use std::collections::BTreeSet;
+    use std::sync::{Mutex, OnceLock};
+
+    /// rust-i18n's locale is process-global, so tests that call `set_locale`
+    /// must be serialized or they race under `cargo test`'s parallel runner.
+    static LOCALE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    pub(crate) fn lock_locale() -> std::sync::MutexGuard<'static, ()> {
+        LOCALE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Flatten the two-space-indented YAML maps we write by hand into dotted
     /// keys (e.g. `menu.file`), mirroring how `t!` looks them up.
@@ -90,6 +101,7 @@ mod tests {
     /// and `set_locale` switches the language.
     #[test]
     fn t_resolves_and_switches_locale() {
+        let _guard = lock_locale();
         rust_i18n::set_locale("en");
         assert_eq!(t!("menu.file"), "File");
         assert_eq!(
@@ -102,6 +114,35 @@ mod tests {
             t!("status.saved", len = 12, path = "a.bin"),
             "已保存 12 字节到 a.bin"
         );
+        rust_i18n::set_locale("en");
+    }
+
+    /// The runtime-key path used by `lang::set_lang` for the window title: a
+    /// `t!` with the key passed as a variable, evaluated after switching.
+    #[test]
+    fn t_resolves_runtime_key() {
+        let _guard = lock_locale();
+        rust_i18n::set_locale("en");
+        let key = "app.title_scylla";
+        assert_eq!(t!(key).into_owned(), "Scylla Dumper");
+        rust_i18n::set_locale("zh-CN");
+        assert_eq!(t!(key).into_owned(), "Scylla 转储器");
+        rust_i18n::set_locale("en");
+    }
+
+    /// `set_lang`'s exact call shape: the key arrives as a `&'static str`
+    /// *parameter*, not a local. Verify the macro handles that identically.
+    fn title_for(title_key: &'static str) -> String {
+        t!(title_key).into_owned()
+    }
+
+    #[test]
+    fn t_resolves_key_from_param() {
+        let _guard = lock_locale();
+        rust_i18n::set_locale("zh-CN");
+        assert_eq!(title_for("app.title_scylla"), "Scylla 转储器");
+        rust_i18n::set_locale("en");
+        assert_eq!(title_for("app.title_scylla"), "Scylla Dumper");
         rust_i18n::set_locale("en");
     }
 }

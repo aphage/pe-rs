@@ -87,4 +87,29 @@ mod tests {
         assert_eq!(normalize("en"), "en");
         assert_eq!(normalize(""), "en");
     }
+
+    /// `set_lang` (the Language-menu handler) must flip the global locale and
+    /// re-resolve the window-title key in the new language — the exact flow
+    /// that showed the raw `app.title_scylla` key.
+    #[test]
+    fn set_lang_flips_locale_and_title_resolves() {
+        use super::{init_lang, set_lang};
+        use rust_i18n::t;
+        let _guard = crate::tests::lock_locale();
+
+        init_lang();
+        let start = if &*rust_i18n::locale() == "en" {
+            "en"
+        } else {
+            "zh-CN"
+        };
+        let target = if start == "en" { "zh-CN" } else { "en" };
+        let ctx = egui::Context::default();
+        set_lang(&ctx, target, "app.title_scylla");
+        assert_eq!(&*rust_i18n::locale(), target);
+        let title = t!("app.title_scylla").into_owned();
+        assert!(title.contains("Scylla"), "title resolved to: {title}");
+        assert_ne!(title, "app.title_scylla", "title fell back to the raw key");
+        set_lang(&ctx, start, "app.title_scylla");
+    }
 }
