@@ -5,6 +5,10 @@
 //! imports / exports / directories), and serialized back to a file. No process
 //! involvement — this is the *disk file editing* paradigm.
 
+// Locale resources are shared with pe-scylla-gui via pe-gui-common; each GUI
+// declares its own `i18n!` so `t!` resolves to a backend in this crate.
+rust_i18n::i18n!("../pe-gui-common/locales");
+
 use eframe::egui;
 use pe_edit::api::{ExportTableEditor, ImportTableEditor, PeEditor, PeViewer};
 use pe_edit::domain::section::{
@@ -12,49 +16,27 @@ use pe_edit::domain::section::{
 };
 use pe_edit::domain::{DataDirectoryIndex, ExportSymbol, ImportFunction, PeDocument, Rva};
 use pe_edit::io::pe::{parse, serialize};
+use rust_i18n::t;
 use std::sync::mpsc;
 
 /// Result of an async file dialog (picked path, or `None` if cancelled).
 type PickResult = Option<std::path::PathBuf>;
 
-/// egui's bundled fonts have no CJK glyphs, so Chinese UI text renders as
-/// boxes. Install a Windows system CJK font as a fallback family.
-fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    for path in [
-        "C:/Windows/Fonts/msyh.ttc",   // Microsoft YaHei (collection)
-        "C:/Windows/Fonts/simhei.ttf", // SimHei
-        "C:/Windows/Fonts/Deng.ttf",   // DengXian
-    ] {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        fonts.font_data.insert(
-            "cjk".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .push("cjk".to_owned());
-        }
-        break;
-    }
-    ctx.set_fonts(fonts);
-}
-
 fn main() -> eframe::Result<()> {
+    // Choose the startup language (persisted choice, else system auto-detect)
+    // before the window is built so the initial title is already localized.
+    pe_gui_common::lang::init_lang();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 700.0])
+            .with_title(t!("app.title")),
         ..Default::default()
     };
     eframe::run_native(
         "pe-edit",
         options,
         Box::new(|cc| {
-            install_fonts(&cc.egui_ctx);
+            pe_gui_common::fonts::install_fonts(&cc.egui_ctx);
             Ok(Box::new(PeEditApp::default()))
         }),
     )
@@ -71,13 +53,13 @@ enum Tab {
 }
 
 impl Tab {
-    fn all() -> [(Tab, &'static str); 5] {
+    fn all() -> [(Tab, String); 5] {
         [
-            (Tab::Headers, "Headers"),
-            (Tab::Sections, "Sections"),
-            (Tab::Imports, "Imports"),
-            (Tab::Exports, "Exports"),
-            (Tab::Directories, "Directories"),
+            (Tab::Headers, t!("tab.headers").into_owned()),
+            (Tab::Sections, t!("tab.sections").into_owned()),
+            (Tab::Imports, t!("tab.imports").into_owned()),
+            (Tab::Exports, t!("tab.exports").into_owned()),
+            (Tab::Directories, t!("tab.directories").into_owned()),
         ]
     }
 }
@@ -139,29 +121,35 @@ impl PeEditApp {
                 Ok(doc) => {
                     self.doc = Some(doc);
                     self.sync_header_edits();
-                    self.status = format!("loaded {}", self.path);
+                    self.status = t!("status.loaded", path = &self.path).into_owned();
                 }
-                Err(e) => self.status = format!("parse failed: {e}"),
+                Err(e) => self.status = t!("status.parse_failed", err = e.to_string()).into_owned(),
             },
-            Err(e) => self.status = format!("read failed: {e}"),
+            Err(e) => self.status = t!("status.read_failed", err = e.to_string()).into_owned(),
         }
     }
 
     /// Serialize the document and write it to `path`.
     fn save_to(&mut self, path: String) {
         let Some(doc) = self.doc.as_ref() else {
-            self.status = "no document".into();
+            self.status = t!("status.no_document").into_owned();
             return;
         };
         match serialize(doc) {
             Ok(bytes) => {
                 let len = bytes.len();
                 match std::fs::write(&path, bytes) {
-                    Ok(()) => self.status = format!("saved {len} bytes to {path}"),
-                    Err(e) => self.status = format!("write failed: {e}"),
+                    Ok(()) => {
+                        self.status = t!("status.saved", len = len, path = &path).into_owned();
+                    }
+                    Err(e) => {
+                        self.status = t!("status.write_failed", err = e.to_string()).into_owned();
+                    }
                 }
             }
-            Err(e) => self.status = format!("serialize failed: {e}"),
+            Err(e) => {
+                self.status = t!("status.serialize_failed", err = e.to_string()).into_owned();
+            }
         }
     }
 
@@ -186,7 +174,7 @@ impl PeEditApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Open PE file")
+                .set_title(t!("dialog.open_pe"))
                 .add_filter("PE files", &["exe", "dll", "sys"])
                 .pick_file();
             let _ = tx.send(picked);
@@ -201,7 +189,7 @@ impl PeEditApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Save PE file")
+                .set_title(t!("dialog.save_pe"))
                 .add_filter("PE files", &["exe", "dll", "sys"])
                 .set_file_name("edited.bin")
                 .save_file();
@@ -237,7 +225,7 @@ impl PeEditApp {
         doc.optional.set_section_alignment(e.section_alignment);
         doc.optional.set_file_alignment(e.file_alignment);
         doc.optional.set_subsystem(e.subsystem);
-        self.status = "headers applied".into();
+        self.status = t!("status.headers_applied").into_owned();
     }
 }
 
@@ -266,25 +254,26 @@ impl eframe::App for PeEditApp {
         // Menu bar.
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open PE File…").clicked() {
+                ui.menu_button(t!("menu.file"), |ui| {
+                    if ui.button(t!("menu.open")).clicked() {
                         self.open_dialog(ui.ctx());
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Save").clicked() {
+                    if ui.button(t!("menu.save")).clicked() {
                         self.save(ui.ctx());
                         ui.close();
                     }
-                    if ui.button("Save As…").clicked() {
+                    if ui.button(t!("menu.save_as")).clicked() {
                         self.save_dialog(ui.ctx());
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Exit").clicked() {
+                    if ui.button(t!("menu.exit")).clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
+                pe_gui_common::lang::lang_menu(ui, "app.title");
             });
         });
 
@@ -305,9 +294,9 @@ impl eframe::App for PeEditApp {
         // Document-source line: the file we are editing, plus the status.
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("文件:");
+                ui.label(t!("toolbar.file"));
                 if self.path.is_empty() {
-                    ui.weak("(未打开)");
+                    ui.weak(t!("toolbar.not_open"));
                 } else {
                     ui.label(&self.path);
                 }
@@ -329,7 +318,7 @@ impl eframe::App for PeEditApp {
                 self.show_doc(ui);
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Open a PE file (File → Open PE File…) to begin editing.");
+                    ui.label(t!("guidance.open_pe"));
                 });
             }
         });
@@ -382,16 +371,17 @@ impl PeEditApp {
                         .hexadecimal(4, false, true),
                 );
                 ui.end_row();
-                ui.label("Imports");
-                ui.label(format!(
-                    "{} modules",
-                    self.doc.as_ref().map(|d| d.imports().len()).unwrap_or(0)
+                ui.label(t!("headers.imports"));
+                ui.label(t!(
+                    "headers.modules",
+                    count = self.doc.as_ref().map(|d| d.imports().len()).unwrap_or(0)
                 ));
                 ui.end_row();
-                ui.label("Exports");
-                ui.label(format!(
-                    "{} symbols",
-                    self.doc
+                ui.label(t!("headers.exports"));
+                ui.label(t!(
+                    "headers.symbols",
+                    count = self
+                        .doc
                         .as_ref()
                         .and_then(|d| d.exports())
                         .map(|e| e.symbols.len())
@@ -399,7 +389,7 @@ impl PeEditApp {
                 ));
                 ui.end_row();
             });
-        if ui.button("Apply header edits").clicked() {
+        if ui.button(t!("button.apply_headers")).clicked() {
             self.apply_headers();
         }
     }
@@ -425,7 +415,7 @@ impl PeEditApp {
                         ui.label(format!("{:#x}", s.header.virtual_size));
                         ui.label(format!("{:#x}", s.header.size_of_raw_data));
                         ui.label(format!("{:#x}", s.header.characteristics));
-                        if ui.button("Remove").clicked() {
+                        if ui.button(t!("button.remove")).clicked() {
                             remove = Some(i);
                         }
                         ui.end_row();
@@ -433,15 +423,15 @@ impl PeEditApp {
                     if let Some(i) = remove
                         && let Err(e) = doc.remove_section(i)
                     {
-                        self.status = format!("remove failed: {e}");
+                        self.status = t!("status.remove_failed", err = e.to_string()).into_owned();
                     }
                 });
         });
         ui.horizontal(|ui| {
-            ui.label("Add section:");
+            ui.label(t!("sections.add_section"));
             ui.add(egui::TextEdit::singleline(&mut self.new_section_name).desired_width(70.0));
             ui.add(egui::DragValue::new(&mut self.new_section_size));
-            if ui.button("Add").clicked() {
+            if ui.button(t!("button.add")).clicked() {
                 let name = self.new_section_name.clone();
                 let size = self.new_section_size as usize;
                 let mut name_bytes = [0u8; 8];
@@ -450,8 +440,10 @@ impl PeEditApp {
                 let chars =
                     IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
                 match doc.add_section(name_bytes, chars, vec![0; size]) {
-                    Ok(_) => self.status = format!("added section {name}"),
-                    Err(e) => self.status = format!("add failed: {e}"),
+                    Ok(_) => self.status = t!("status.added_section", name = &name).into_owned(),
+                    Err(e) => {
+                        self.status = t!("status.add_failed", err = e.to_string()).into_owned();
+                    }
                 }
             }
         });
@@ -465,24 +457,24 @@ impl PeEditApp {
         ui.columns(2, |cols| {
             // Left column: add row on top, then the module list.
             cols[0].vertical(|ui| {
-                ui.label("模块");
+                ui.label(t!("imports.modules"));
                 ui.horizontal(|ui| {
-                    ui.label("Add:");
+                    ui.label(t!("imports.add"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_import_module)
-                            .hint_text("module")
+                            .hint_text(t!("imports.hint_module"))
                             .desired_width(90.0),
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_import_func)
-                            .hint_text("func")
+                            .hint_text(t!("imports.hint_func"))
                             .desired_width(90.0),
                     );
-                    if ui.button("Add").clicked() {
+                    if ui.button(t!("button.add")).clicked() {
                         let module = self.new_import_module.clone();
                         let func = self.new_import_func.clone();
                         if module.trim().is_empty() || func.trim().is_empty() {
-                            self.status = "module and function names required".into();
+                            self.status = t!("status.module_func_required").into_owned();
                         } else {
                             match doc.add_import(&module, &[ImportFunction::by_name(func.clone())])
                             {
@@ -490,9 +482,15 @@ impl PeEditApp {
                                     self.selected_import = Some(module.clone());
                                     self.new_import_module.clear();
                                     self.new_import_func.clear();
-                                    self.status = format!("added import {module}!{func}");
+                                    self.status =
+                                        t!("status.added_import", module = &module, func = &func)
+                                            .into_owned();
                                 }
-                                Err(e) => self.status = format!("add import failed: {e}"),
+                                Err(e) => {
+                                    self.status =
+                                        t!("status.add_import_failed", err = e.to_string())
+                                            .into_owned();
+                                }
                             }
                         }
                     }
@@ -510,7 +508,7 @@ impl PeEditApp {
                                         selected,
                                         format!("{} ({})", d.name, d.functions.len()),
                                     );
-                                    if ui.small_button("Remove").clicked() {
+                                    if ui.small_button(t!("button.remove")).clicked() {
                                         remove = Some(d.name.clone());
                                     }
                                     r
@@ -522,7 +520,7 @@ impl PeEditApp {
                             }
                         }
                         if doc.imports.is_empty() {
-                            ui.weak("no imports");
+                            ui.weak(t!("empty.no_imports"));
                         }
                     });
                 if let Some(m) = remove {
@@ -530,7 +528,8 @@ impl PeEditApp {
                         self.selected_import = None;
                     }
                     if let Err(e) = doc.remove_import(&m) {
-                        self.status = format!("remove import failed: {e}");
+                        self.status =
+                            t!("status.remove_import_failed", err = e.to_string()).into_owned();
                     }
                 }
             });
@@ -541,22 +540,22 @@ impl PeEditApp {
                     .as_ref()
                     .and_then(|name| doc.imports.iter().position(|d| &d.name == name))
                 else {
-                    ui.weak("在左边选择一个模块");
+                    ui.weak(t!("imports.select_module_left"));
                     return;
                 };
-                ui.label(format!(
-                    "{} — {} 个函数",
-                    doc.imports[idx].name,
-                    doc.imports[idx].functions.len()
+                ui.label(t!(
+                    "imports.module_funcs",
+                    module = &doc.imports[idx].name,
+                    count = doc.imports[idx].functions.len()
                 ));
                 ui.horizontal(|ui| {
-                    ui.label("Add fn:");
+                    ui.label(t!("imports.add_fn"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_import_add_fn)
-                            .hint_text("func")
+                            .hint_text(t!("imports.hint_func"))
                             .desired_width(130.0),
                     );
-                    if ui.button("Add").clicked() {
+                    if ui.button(t!("button.add")).clicked() {
                         let func = self.new_import_add_fn.clone();
                         if !func.trim().is_empty() {
                             doc.imports[idx]
@@ -581,16 +580,16 @@ impl PeEditApp {
                                         );
                                     }
                                     ImportFunction::Ordinal { ordinal } => {
-                                        ui.label(format!("#{ordinal} (ordinal)"));
+                                        ui.label(t!("imports.ordinal_fn", ordinal = ordinal));
                                     }
                                 }
-                                if ui.small_button("Remove").clicked() {
+                                if ui.small_button(t!("button.remove")).clicked() {
                                     remove_fn = Some(i);
                                 }
                             });
                         }
                         if desc.functions.is_empty() {
-                            ui.weak("no functions");
+                            ui.weak(t!("empty.no_functions"));
                         }
                     });
                 if let Some(i) = remove_fn {
@@ -626,37 +625,37 @@ impl PeEditApp {
                                 egui::TextEdit::singleline(s.forwarder.get_or_insert_default())
                                     .desired_width(200.0),
                             );
-                            if ui.button("Remove").clicked() {
+                            if ui.button(t!("button.remove")).clicked() {
                                 remove = Some(s.ordinal);
                             }
                             ui.end_row();
                         }
                     });
             } else {
-                ui.label("No export table — add a symbol below to create one.");
+                ui.label(t!("empty.no_export_table"));
             }
         });
         if let Some(exports) = doc.exports.as_mut() {
             ui.horizontal(|ui| {
-                ui.label("Module:");
+                ui.label(t!("exports.module"));
                 ui.add(
                     egui::TextEdit::singleline(exports.module_name.get_or_insert_default())
                         .desired_width(200.0),
                 );
-                ui.label("Base:");
+                ui.label(t!("exports.base"));
                 ui.add(egui::DragValue::new(&mut exports.base).hexadecimal(8, false, true));
             });
         }
         ui.horizontal(|ui| {
-            ui.label("Add:");
+            ui.label(t!("exports.add"));
             ui.add(egui::DragValue::new(&mut self.new_export_ordinal));
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_export_name)
-                    .hint_text("name (empty = ordinal-only)")
+                    .hint_text(t!("exports.hint_name"))
                     .desired_width(200.0),
             );
             ui.add(egui::DragValue::new(&mut self.new_export_rva).hexadecimal(8, false, true));
-            if ui.button("Add export").clicked() {
+            if ui.button(t!("button.add_export")).clicked() {
                 let name = self.new_export_name.trim();
                 let symbol = ExportSymbol {
                     name: (!name.is_empty()).then(|| name.to_string()),
@@ -666,16 +665,20 @@ impl PeEditApp {
                 };
                 match doc.add_export(symbol) {
                     Ok(()) => {
-                        self.status = format!("added export ordinal {}", self.new_export_ordinal)
+                        self.status = t!("status.added_export", ordinal = self.new_export_ordinal)
+                            .into_owned();
                     }
-                    Err(e) => self.status = format!("add export failed: {e}"),
+                    Err(e) => {
+                        self.status =
+                            t!("status.add_export_failed", err = e.to_string()).into_owned();
+                    }
                 }
             }
         });
         if let Some(o) = remove
             && let Err(e) = doc.remove_export(o)
         {
-            self.status = format!("remove export failed: {e}");
+            self.status = t!("status.remove_export_failed", err = e.to_string()).into_owned();
         }
     }
 

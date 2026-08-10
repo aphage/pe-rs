@@ -10,5 +10,7 @@ publish = false
 
 [dependencies]
 pe-edit = { path = "../pe-edit" }
+pe-gui-common = { path = "../pe-gui-common" }
+rust-i18n = "4"
 eframe = { version = "0.36.0", default-features = false, features = ["glow", "default_fonts"] }
 rfd = "0.17.2"
