@@ -613,6 +613,11 @@ impl eframe::App for ScyllaGui {
                         ui.close();
                     }
                     ui.separator();
+                    if ui.button("Exit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("Imports", |ui| {
                     if ui.button("Save Tree…").clicked() {
                         self.save_tree_dialog(ui.ctx());
                         ui.close();
@@ -621,7 +626,8 @@ impl eframe::App for ScyllaGui {
                         self.load_tree_dialog(ui.ctx());
                         ui.close();
                     }
-                    ui.separator();
+                });
+                ui.menu_button("View", |ui| {
                     if ui.button("Disassembler").clicked() {
                         self.show_disasm = true;
                         ui.close();
@@ -629,10 +635,6 @@ impl eframe::App for ScyllaGui {
                     if ui.button("Options…").clicked() {
                         self.show_options = true;
                         ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Exit").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
             });
