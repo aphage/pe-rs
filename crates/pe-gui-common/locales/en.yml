@@ -8,6 +8,9 @@ menu:
   save: "Save"
   save_as: "Save As…"
   exit: "Exit"
+  edit: "Edit"
+  undo: "Undo"
+  redo: "Redo"
   open_process: "Open Process…"
   imports: "Imports"
   save_tree: "Save Tree…"
@@ -39,11 +42,30 @@ guidance:
   open_pe: "Open a PE file (File → Open PE File…) to begin editing."
   dump_process: "Dump a process (File → Open Process…) to begin."
 
+view:
+  file: "File layout"
+  memory: "Memory layout"
+
+conv:
+  image_base: "image base %{base}"
+
+hint:
+  e_lfanew: "e_lfanew is recomputed from the stub length on save and is read-only here."
+  coff_derived: "Section count / optional-header size are recomputed by the library on save and are read-only here."
+  optional_32: "For 32-bit images the image base is truncated to 32 bits on apply."
+  optional_derived: "size of image / size of headers / number of rva and sizes are recomputed on save (read-only)."
+  section_raw: "VA / VSize are editable; raw offset / size are recomputed on save (read-only)."
+  dirs_managed: "Marked directories are re-rendered from the rich import/export/... forms on save (read-only); the rest are directly editable."
+
 dialog:
   open_pe: "Open PE file"
   save_pe: "Save PE file"
   save_tree: "Save import tree"
   load_tree: "Load import tree"
+  unsaved_title: "Unsaved changes"
+  unsaved_msg: "The current file has unsaved changes. Discard them and continue?"
+  discard: "Discard"
+  cancel: "Cancel"
 
 window:
   pick_process: "Pick Process"
@@ -87,12 +109,15 @@ sections:
   add_section: "Add section:"
   title: "Sections"
   hint_dump: "dump a process to see sections"
+  overlap: "overlapping section VA ranges: %{names}"
 
 imports:
   modules: "Modules"
   add: "Add:"
   hint_module: "module"
   hint_func: "func"
+  filter: "Filter:"
+  filter_hint: "module name"
   select_module_left: "Select a module on the left"
   module_funcs: "%{module} — %{count} functions"
   add_fn: "Add fn:"
@@ -157,6 +182,7 @@ node:
   relocations: "Relocations"
   tls: "TLS"
   load_config: "Load Config"
+  converter: "Address Converter"
 
 binary:
   select_section: "select a section"
@@ -167,6 +193,15 @@ binary:
   go: "Go"
   jump_start: "Jump to section start"
   jump_end: "Jump to section end"
+  find_label: "Find:"
+  find: "Find"
+  not_found: "byte sequence not found"
+
+search:
+  label: "Find in tree:"
+  hint: "sections/imports/exports/resources"
+  find: "Find"
+  results: "search results"
 
 reloc:
   summary: "%{blocks} blocks · %{entries} entries"
@@ -174,6 +209,9 @@ reloc:
   col_page: "Page RVA"
   col_offset: "Offset"
   col_type: "Type"
+
+resource:
+  preview: "resource bytes preview"
 
 status:
   loaded: "loaded %{path}"
@@ -216,6 +254,8 @@ status:
   tree_load_failed: "load tree failed: %{err}"
   added_iat_region: "added IAT region %{va}:%{size}"
   region_needs_va_size: "region needs VA and size (hex)"
+  modified: "unsaved changes"
+  roundtrip_invalid: "save blocked: the serialized image fails to re-parse (%{err})"
 
 button:
   apply_headers: "Apply header edits"
@@ -223,3 +263,4 @@ button:
   add: "Add"
   add_export: "Add export"
   close: "Close"
+  convert: "Convert"
