@@ -8,6 +8,9 @@
 //! ? suspect / ✗ invalid), the tree is curated, and **Fix Dump** rebuilds the
 //! imports from it (writing the OEP).
 
+// Run without a console window (Windows GUI subsystem).
+#![windows_subsystem = "windows"]
+
 // Locale resources are shared with pe-edit-gui via pe-gui-common; each GUI
 // declares its own `i18n!` so `t!` resolves to a backend in this crate.
 rust_i18n::i18n!("../pe-gui-common/locales");
@@ -45,6 +48,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             pe_gui_common::fonts::install_fonts(&cc.egui_ctx);
+            pe_gui_common::theme::install_bright_theme(&cc.egui_ctx);
             Ok(Box::new(ScyllaGui::default()))
         }),
     )
@@ -705,6 +709,7 @@ impl eframe::App for ScyllaGui {
         egui::Panel::left("tree_pane")
             .resizable(true)
             .default_size(200.0)
+            .frame(pe_gui_common::theme::sidebar_frame())
             .show(ui, |ui| {
                 self.show_structure_tree(ui);
             });
