@@ -14,6 +14,7 @@
 pub mod config;
 pub mod fonts;
 pub mod lang;
+pub mod theme;
 
 // Declare the locale resources (under `locales/`, defaulting to English when a
 // key is missing). This generates the `t!` macro at the crate root.
