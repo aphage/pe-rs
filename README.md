@@ -15,7 +15,7 @@ libraries share the PE *image model* (`pe-edit` provides `PeDocument` +
 ```
 crates/pe-edit        lib A — disk PE editing API + image model
 crates/pe-edit-cli    CLI A — `pe-edit` (show / set-entry / add-section / add-import / merge / rebuild)
-crates/pe-edit-gui    GUI A — CFF-Explorer-style editor (Headers/Sections/Imports/Exports/Directories)
+crates/pe-edit-gui    GUI A — CFF-Explorer-style editor (12-node structure tree: DOS/COFF/Optional/Directories/Sections/Imports/Exports/Resources/Relocs/TLS/LoadConfig/Converter)
 crates/pe-scylla      lib B — process operation + dump API (depends on pe-edit)
 crates/pe-scylla-cli  CLI B — `pe-scylla` (dump → scan → fix → save)
 crates/pe-scylla-gui  GUI B — Scylla-style tool (process picker → dump → IAT → fix → save)
@@ -108,6 +108,19 @@ data directories / add-remove sections / write-alloc), `ImportTableEditor`,
 `ExportTableEditor`, `DirectoryEditor` (resource / reloc / TLS / LoadConfig),
 plus `feature::{VaConverter, rebuild_section_table, merge_sections}`.
 
+The **GUI** (`pe-edit-gui`) is a bright, bilingual CFF-Explorer-style editor:
+all DOS/COFF/Optional header fields editable in place (writer-derived fields —
+`e_lfanew`, section/optional sizes, raw offsets, the 7 rich-form directories —
+are shown read-only and re-rendered on save), a File/Memory (512/4K) layout
+toggle, a virtualized section hex view with right-click jump and byte find,
+an editable section table (name/VA/VSize/Characteristics) with overlapping-VA
+warnings, add/remove sections, import/export editing, a resource tree with
+leaf byte preview, relocation / TLS / load-config viewers, an RVA/VA/raw
+address converter, a snapshot undo/redo stack (Ctrl+Z / Ctrl+Y, one step
+per edit gesture), and a cross-tree search box (sections / imports / exports /
+resources, results jump to the matching node). Unsaved edits are guarded on
+Open/Save-As/close.
+
 ## Architecture
 
 Both libraries are built *outside-in*: a stable public API (domain model +
@@ -192,6 +205,8 @@ cargo fmt --check
       API scoring, IAT autosearch, suspend/resume, dump memory/section, fix options
       (OFT, new IAT in section, direct imports), save/load tree (XML+JSON), PE rebuild,
       GUI log/options/disassembler
-- [ ] pe-edit: memory-view (4K) / disk-view (512) toggle in the editor (CFF Explorer File/Memory dual view)
+- [x] pe-edit: memory-view (4K) / disk-view (512) toggle in the editor (CFF Explorer File/Memory dual view)
+- [x] pe-edit: snapshot undo/redo (Ctrl+Z / Ctrl+Y), section VA-overlap warnings
+- [x] pe-edit: cross-tree search (sections / imports / exports / resources with jump-to-node)
 - [ ] pe-scylla: auto-trace to find OEP/IAT (Scylla AutoTrace); per-tool feature pass,
       one git commit per feature
