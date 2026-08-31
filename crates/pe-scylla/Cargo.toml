@@ -6,9 +6,14 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+homepage = "https://github.com/aphage/pe-rs"
+documentation = "https://docs.rs/pe-scylla"
+keywords = ["dump", "iat-fix", "process", "reverse-engineering", "windows"]
+categories = ["development-tools"]
 
 [dependencies]
-pe-edit = { path = "../pe-edit" }
+pe-edit = { path = "../pe-edit", version = "0.1.0" }
 iced-x86 = "1.21.0"
 thiserror.workspace = true
 windows-sys = { version = "0.61.2", features = [
